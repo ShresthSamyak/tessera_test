@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Protocol
+from typing import Any, Callable, Protocol
 
 from .transcript import Transcript
+from .types import ToolResult
 from .world import World
 
 
@@ -46,7 +47,7 @@ Predicate = Callable[[World, Transcript], bool]
 class ToolProxy(Protocol):
     """What an agent is handed. Backed by Dispatcher."""
 
-    def call(self, tool: str, /, **args): ...
+    def call(self, tool: str, /, **args: Any) -> ToolResult: ...
 
 
 @dataclass(frozen=True)

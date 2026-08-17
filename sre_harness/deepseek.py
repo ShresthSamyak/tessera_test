@@ -194,7 +194,7 @@ class DeepSeekAgent:
         stopped = "completed"
         error: str | None = None
 
-        for _turn in range(self.max_turns):
+        for _ in range(self.max_turns):
             try:
                 response = self._transport(
                     {
