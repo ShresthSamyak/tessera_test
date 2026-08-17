@@ -89,6 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
              "the agent, against the same bare tool-loop arm",
     )
     g.add_argument(
+        "--planner",
+        default="deepseek",
+        choices=["deepseek", "canonical"],
+        help="plan mode only: 'canonical' uses the hand-written plan per "
+             "scenario, isolating the mode's own ceiling from planner quality",
+    )
+    g.add_argument(
         "--plan-strictness",
         default="paranoid",
         choices=MODES,
@@ -133,6 +140,7 @@ def make_agent_factory(args: argparse.Namespace):
             return PlanAgent(
                 strictness=args.strictness,
                 model=args.model,
+                canonical=args.planner == "canonical",
                 declassifiers=args.declassifiers == "safe",
                 capabilities=not args.no_capabilities,
                 ledger_path=args.ledger,
@@ -288,6 +296,7 @@ def main(argv: list[str] | None = None) -> int:
                 return PlanAgent(
                     strictness=args.plan_strictness,
                     model=args.model,
+                    canonical=args.planner == "canonical",
                     declassifiers=args.declassifiers == "safe",
                     capabilities=not args.no_capabilities,
                     ledger_path=args.ledger,

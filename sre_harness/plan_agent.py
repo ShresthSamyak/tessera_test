@@ -246,7 +246,7 @@ class PlanAgent:
         # runner before the agent exists, so this is the point the two meet.
         dispatcher.guard = PlanSubcallGuard(session, self.stats)
 
-        planner = self._make_planner()
+        planner = self._make_planner(scenario)
         specs = harness_tool_specs(dispatcher.registry)
         try:
             the_plan: Plan = planner.plan(scenario.instruction, specs)
