@@ -19,7 +19,7 @@ from sre_harness import cli
 from sre_harness.agents import ScriptedAgent
 from sre_harness.env import find_dotenv, load_dotenv, parse_dotenv, redact
 from sre_harness.runner import ABReport, RunResult, ab, calibrate, frontier
-from sre_harness.scenarios import ALL, BY_ID
+from sre_harness.scenarios import ALL
 from sre_harness.tessera_guard import guard_factory
 
 
