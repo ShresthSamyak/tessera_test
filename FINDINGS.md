@@ -859,6 +859,90 @@ as Finding 1.
 
 ---
 
+### Finding 24 — an unwritable ledger is a denial of service, undocumented
+
+**Severity: low-medium. The behaviour is right; the silence about it is not.**
+
+Two distinct failures, and they are worth separating:
+
+- **At open.** `open_ledger` reads the existing chain head to resume it, so a
+  path it cannot read raises immediately — at startup, before any tool call.
+  That is the good failure: loud, early, nothing runs unaudited.
+- **Mid-run.** A disk that fills or goes read-only *after* writes have been
+  succeeding raises `OSError` straight out of `authorize_call`. The decision
+  never returns, so no caller proceeds on an unaudited ALLOW
+  (`test_a_failed_ledger_write_never_returns_an_authorization`).
+
+Failing closed is the right call for a security tool — an action taken without
+an audit record is worse than an action not taken. But it is nowhere in the
+docs, and it composes badly with Finding 16: `ProxyRunner._serve` has no
+`try/except` around `handle_request`, so a full disk does not degrade the agent,
+it **terminates the session and the upstream server**.
+
+Combined with Finding 19 (one ledger file open for the whole proxy lifetime) and
+the ~200 bytes/entry with no rotation, "the audit disk filled up" is a
+foreseeable way to take down a long-running deployment.
+
+---
+
+### Finding 25 — HMAC key rotation has no supported story
+
+**Severity: low. A gap rather than a bug, but the natural attempt fails.**
+
+`verify_ledger` takes **one** `hmac_key` and applies it to every entry. There is
+no per-entry key id and no way to supply several. So rotating a key in place
+produces a file that can never be verified whole again:
+
+```
+entries under key A, then key B, one file:
+  verify(hmac_key=A) -> fails
+  verify(hmac_key=B) -> fails
+  verify()           -> fails
+```
+
+The same applies in the direction an operator is most likely to try — turning
+keying **on** for an existing unkeyed file. Both halves become unverifiable.
+
+The workable procedure exists but is undocumented: start a new file per key, and
+carry continuity externally by recording the old file's `head` and passing it as
+the new file's `--expected-head` anchor. That composes correctly
+(`test_starting_a_new_file_is_the_workable_rotation_procedure`) — it just is not
+written down anywhere, and the obvious thing to try silently destroys
+verifiability of the whole history.
+
+---
+
+### Finding 26 — plan-mode findings are about plan mode, not about my planner (checked)
+
+Not a defect — a **confound I had to rule out**, and the reason it belongs here
+is that until I did, Findings 10–12 were not safely attributable.
+
+Every plan-mode result so far came from `DeepSeekPlanner`, which is code I wrote
+for this harness. A bug in my planner would look exactly like a limitation of
+plan mode. So I drove Tessera's shipped `ClaudePlanner` through an injected
+client (no key required) and compared:
+
+- **Identical plan JSON produces identical `Plan` objects** from both planners.
+  They are interchangeable at the DSL.
+- **The security boundary is shared.** `ClaudePlanner` rejects an invented tool
+  and a dangling variable exactly as mine does, because both end in `parse_plan`.
+- **The wire-level property holds for both.** One call per run, `tool_choice`
+  pinned to `emit_plan`, and neither the injection text nor the credential
+  appears in the request.
+- **Finding 10 is a DSL property, not my bug.** A `field` reference to a key
+  that will not exist validates cleanly for *either* planner, because
+  `parse_plan` knows tool names and grammar but not runtime result shapes.
+  `ClaudePlanner` would emit the same unvalidatable reference mine did.
+- **`ClaudePlanner` surfaces a refusal as `PlannerError`** rather than an empty
+  plan — which matters, because an empty plan runs zero steps, takes zero
+  dangerous actions, and would score as perfect containment.
+
+What this does **not** rule out: whether `claude-*` writes *better plans* than
+`deepseek-chat`. Finding 12's utility numbers are still one model's plans, and
+the canonical-plan arm exists precisely because of that.
+
+---
+
 ### What the proxy gets right
 
 Worth stating plainly, because Findings 17–19 are severe enough to read as a
@@ -882,9 +966,20 @@ verdict on the whole thing and they are not:
 
 ## What holds up
 
-Verified mechanically (280 tests; `test_tessera_guard.py` 38,
+Verified mechanically (294 tests; `test_tessera_guard.py` 38,
 `test_plan_mode.py` 34, `test_operational.py` 13, `test_proxy.py` 15,
-`test_sdk_and_ledger.py` 18, `test_integrations.py` 19):
+`test_sdk_and_ledger.py` 18, `test_integrations.py` 19,
+`test_planner_and_ledger_edges.py` 14):
+
+- **Both planners share one security boundary.** `ClaudePlanner` and my
+  `DeepSeekPlanner` produce identical `Plan` objects from identical JSON, and
+  both reject an invented tool and a dangling variable — because both end in
+  `parse_plan`. See Finding 26 for why that mattered.
+- **A refusal is not silently an empty plan.** `ClaudePlanner` raises
+  `PlannerError` on `stop_reason == "refusal"`; an empty plan would have run
+  zero steps and scored as perfect containment.
+- **The ledger fails closed when it cannot be written**, at open and mid-run
+  alike — no authorization is ever returned unaudited (Finding 24).
 
 - **Tessera's own benchmark independently reproduces the plan-mode claim.** Its
   suite, its runner, its definitions: plan mode contains 7/7 attacks, at a
@@ -985,8 +1080,9 @@ python -m pytest tests/test_operational.py -s                  # Findings 13-16
 python -m pytest tests/test_proxy.py                           # Findings 17-19
 python -m pytest tests/test_sdk_and_ledger.py                   # Finding 20, ledger scope
 python -m pytest tests/test_integrations.py                     # Findings 21-23
+python -m pytest tests/test_planner_and_ledger_edges.py         # Findings 24-26
 python -m tessera.cli bench                                    # Finding 23
-python -m pytest                                               # 280 invariants
+python -m pytest                                               # 294 invariants
 ```
 
 ## Caveats, stated plainly
@@ -994,27 +1090,55 @@ python -m pytest                                               # 280 invariants
 - **`--repeats 1`** for every frontier and plan run. The 56%/67%
   permissive-vs-balanced gap is one scenario out of nine and should not be read
   as a real difference. The calibration result (Finding 9) *is* replicated:
-  three full runs plus 3× repeats. A5 landed in 2 of 3 runs — it is borderline,
+  three full runs plus 3x repeats. A5 landed in 2 of 3 runs — it is borderline,
   and the 13-vs-12 survivor counts between runs come from that.
 - **N=4 attacks** in the DeepSeek arms after calibration discarded seven. The
   scripted matrix (N=10 claimed) carries the policy findings; the DeepSeek runs
   carry Findings 2, 9, 10 and 11.
-- **One model**, for both the agent and the planner. All of Finding 9 is about
-  `deepseek-chat` specifically, and Findings 10–11 are about it as a planner.
+
+- **One model, and for plan mode, a planner I wrote myself.** This is the
+  biggest single confound in the document and it deserves its own paragraph.
+
+  Every plan-mode number here was produced by `sre_harness/planner.py` —
+  `DeepSeekPlanner`, code I wrote for this harness, not Tessera's shipped
+  planner. A bug in my prompt, my JSON extraction, or my fallback parsing would
+  present as a limitation of plan mode and I would have written it up as one.
+
+  Finding 26 is the check: I drove Tessera's own `ClaudePlanner` through an
+  injected client and confirmed the two are interchangeable at the DSL, share
+  the same `parse_plan` boundary, hold the same wire-level property (one call,
+  no tool output), and would both emit the unvalidatable `field` reference that
+  Finding 10 is about. So Findings 10–12 are attributable to plan mode.
+
+  What that does **not** establish: whether a stronger model writes better
+  plans. Finding 12's utility numbers are `deepseek-chat`'s plans specifically,
+  which is exactly why the canonical hand-written arm exists — it brackets the
+  ceiling from above while the live arm measures one model from below. Anyone
+  reading the plan-mode utility figures should treat them as "one mid-tier model
+  planning against a 16-tool surface", not as plan mode's ceiling.
+
+  Likewise all of Finding 9 (procedural framing beats direct instruction) is
+  about `deepseek-chat` as an *agent*. A different model may well fall for a
+  different subset, and the whole point of Finding 9 is that the subset is
+  shrinking over time.
+
 - **Plan mode's containment is partly an artefact of a small tool surface.** With
   16 tools and short tasks, a fixed plan is usually adequate. The expressiveness
   ceiling (Finding 12) will bite harder as tasks get longer, and Finding 11
   suggests the pressure release valve is delegation — which is where the
   guarantee weakens.
-- **Findings 13–20 are ones I went looking for, not ones the corpus produced.**
+- **Findings 13–26 are ones I went looking for, not ones the corpus produced.**
   Covered: non-ASCII, session longevity, gate cost, concurrency, payload shape,
   the `tessera run` proxy end-to-end, streaming notifications, proxy session
-  lifetime, the `protect()` SDK path, `@tool` annotations, declassifier
-  construction, and every row of the ledger's honest-scope table including
-  keyed ledgers and `--expected-head`.
+  lifetime, the `protect()` SDK path, the AgentDojo runtime, `@tool`
+  annotations, declassifier construction, capability expiry/forgery/attenuation,
+  `tessera bench` against its own README, ledger write failure at open and
+  mid-run, HMAC key rotation, and every row of the ledger's honest-scope table.
 - **Still unchecked.** No HTTP/SSE MCP transport ships today — stdio is the only
   one — so Finding 16 is a forward-looking risk there rather than a present bug,
   but `MCPInterceptor` is explicitly documented as transport-agnostic and a
-  shared-session HTTP transport would walk straight into it. Also untested:
-  behaviour when the ledger disk fills mid-run, HMAC key rotation, and the
-  `ClaudePlanner` path (I only drove the DeepSeek planner I wrote).
+  shared-session HTTP transport would walk straight into it. Also untested: the
+  `tessera bench` numbers under a real model rather than its scripted harness,
+  and any deployment longer than a single benchmark run — Findings 14, 15 and 19
+  all predict that the interesting failures start after hour one, and nothing
+  here ran that long.
