@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from sre_harness.scenarios import ALL, ATTACKS, BENIGN
+from sre_harness.scenarios import ALL, BENIGN
 from sre_harness.soak import SoakReport, run_soak, soak, vary
 from sre_harness.tessera_guard import guard_factory
 

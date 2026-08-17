@@ -20,7 +20,8 @@ python -m sre_harness.cli tools             # tool surface + both label systems
 python -m sre_harness.cli calibrate         # run everything bare, discard invalid cases
 python -m sre_harness.cli ab                # calibrate, then A/B the survivors
 python -m sre_harness.cli frontier          # A/B every strictness mode at once
-python -m pytest                            # 261 invariants
+python -m sre_harness.cli soak              # many tasks through ONE session
+python -m pytest                            # 308 invariants
 ```
 
 Real runs need a model:
@@ -41,6 +42,11 @@ bare arm. On this corpus it is the only arm that contains everything:
   plan                 100%      100%          78%         100%            0
   (bare)                 0%         -         100%         100%            0
 ```
+
+`soak` is the one that does not need a model and matters most. Every other
+command builds a fresh guard per scenario; a real proxy keeps one `Session` for
+the life of the process. Changing only that drops benign pass rate from 78% to
+36%, in a single step rather than gradually — see FINDINGS 27.
 
 The default `--agent scripted` proves the loop and nothing else — see
 *Calibration*. Runs share no state, so `--workers N` only trades API rate limit
