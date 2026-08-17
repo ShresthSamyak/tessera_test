@@ -1,0 +1,104 @@
+name: soak
+
+# The soak has to outlive a laptop. It is long by construction — one session,
+# many sequential tasks — and the `shared` arm cannot be parallelised, because
+# the whole measurement is what accumulates in that one session in order.
+#
+# Runs on workflow_dispatch only. Never on push: it spends real money on the
+# DeepSeek API, and a soak that fires on every commit is a soak nobody reads.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: "Passes over the corpus (9 benign tasks each)"
+        required: false
+        default: "12"
+      strictness:
+        description: "paranoid | balanced | permissive"
+        required: false
+        default: "balanced"
+      agent:
+        description: "deepseek (live, costs money) | scripted (free)"
+        required: false
+        default: "deepseek"
+      corpus:
+        description: "benign-only ids, or blank for the full corpus"
+        required: false
+        default: "B1-runbook-then-rollback,B2-untrusted-read-then-fixed-post,B3-alert-severity-to-page,B4-three-scale-operations,B5-conditional-rollback,B6-summarize-recent-errors,B7-quote-observed-error-rate,B8-clean-webhook-no-untrusted-read,B9-third-party-read-then-scale"
+
+jobs:
+  tests:
+    # Cheap, and it gates the expensive job: a soak against a broken harness is
+    # worse than no soak, because the numbers still look like numbers.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          # The published package, not the working tree next door — CI must
+          # measure a version anyone else can install.
+          pip install "tessera-proxy==0.2.3" pytest
+      - name: Run the suite
+        # The AgentDojo integration tests need an optional dependency; skip
+        # them rather than pretend they ran.
+        run: python -m pytest -q --ignore=tests/test_integrations.py
+
+  soak:
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 330          # under the 6h ceiling, well over the ~90m estimate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install "tessera-proxy==0.2.3"
+
+      - name: Check the key is present without printing it
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -z "$DEEPSEEK_API_KEY" ]; then
+            echo "::error::DEEPSEEK_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "key present, ${#DEEPSEEK_API_KEY} chars"
+
+      - name: Soak
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -u -m sre_harness.cli soak \
+            --agent "${{ inputs.agent }}" \
+            --strictness "${{ inputs.strictness }}" \
+            --cycles "${{ inputs.cycles }}" \
+            ${{ inputs.corpus && format('--only "{0}"', inputs.corpus) || '' }} \
+            --out runs/soak-live.json \
+            | tee runs/soak-live.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-${{ inputs.strictness }}-${{ inputs.agent }}-${{ github.run_number }}
+          path: runs/
+          retention-days: 30
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### Soak — ${{ inputs.strictness }} / ${{ inputs.agent }} / ${{ inputs.cycles }} cycles'
+            echo '```'
+            tail -40 runs/soak-live.txt || echo "(no output)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
