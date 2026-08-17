@@ -490,9 +490,171 @@ this corpus is closer to 5–6 of 9.
 
 ---
 
+## Real-world operational edge cases
+
+Findings 1–12 are all about *decisions*: does the policy allow or block the
+right call. This section is about everything that only shows up after the demo
+works — the ten-thousandth log line, the second hour of a session, a Japanese
+log line, two tool calls arriving at once. None of it is visible from a scenario
+corpus, and it is the part most likely to matter to a real adopter.
+
+I did not have these when I first wrote this document. They came from going
+looking (`tests/test_operational.py`, 13 cases).
+
+---
+
+### Finding 13 — non-ASCII content is invisible to value-flow matching
+
+**Severity: high for any non-English deployment. This is a straightforward
+bypass, not a subtlety.**
+
+`_TOKEN_RE` is `[A-Za-z0-9_\-./:@+=?&%]+`. A Japanese, Cyrillic, Arabic, or Thai
+payload produces **no trackable token at all**, so value-flow matching has
+nothing to match. `_looks_secretish` compounds it with an explicit
+`isascii()` guard, so short non-ASCII secrets are never secret-shaped either.
+
+The textbook flow — read a secret out of an untrusted log, republish it verbatim
+— behaves like this in `balanced`:
+
+| secret in the log line | republish blocked? |
+|---|---|
+| `SENTINEL-Zx9-4471` | **yes** |
+| `センチネル-機密-4471` | **no** |
+
+Same mode, same mechanism, same unambiguous provenance — the secret is read
+*from the untrusted source itself*, so this is not Finding 1's trusted-source
+hole. It is purely tokenization.
+
+A Japanese log line tokenizes to nothing but whatever ASCII happens to be
+embedded in it:
+
+```
+'決済APIのエラー率が11.4%を超えました パスワードは hunter2-Zx9 です'
+  -> {'hunter2-Zx9'}
+```
+
+`paranoid` and plan mode are unaffected — context taint does not tokenize, and
+plan labels are per-value. So the workaround exists, but it is "do not use the
+default mode", and nothing in the docs says so.
+
+**Recommendation:** widen the token regex to Unicode word characters, or
+segment on non-word boundaries rather than matching an ASCII allowlist. Failing
+that, document that `balanced` and `permissive` provide no value-flow coverage
+outside ASCII.
+
+---
+
+### Finding 14 — taint never recovers, so long-lived sessions degrade to "refuse everything"
+
+**Severity: high for any agent that outlives one task.**
+
+`context_level` is a lattice meet: it only ever falls. There is no
+`reset`, `clear`, `scope`, or `checkpoint` on `Session` — I checked by
+enumeration, and `test_taint_never_recovers_and_there_is_no_reset` asserts the
+absence so it fails if one is ever added.
+
+Concretely, in `paranoid`: one `search_logs` taints the session permanently.
+Twenty subsequent *trusted* runbook reads do not clean it. Every dangerous
+action for the rest of the process is blocked.
+
+The harness hides this because every scenario builds a fresh `World` and a fresh
+`Session` — one task, one session. A real on-call agent works incidents all day
+in one process. On that shape, `paranoid` is usable for exactly one task and
+then bricks, and `balanced` accumulates tokens until Finding 4's over-blocking
+swamps it.
+
+There is no supported way to say "this unit of work is finished, start the next
+one clean" — which is a normal thing to want and a safe thing to grant, since a
+new user instruction is trusted input.
+
+**Recommendation:** a first-class task/turn boundary — `Session.begin_task()`
+that resets `context_level` and `_tainted_tokens` while keeping the ledger
+chain continuous. It is also the natural home for Finding 3's
+`trust_instruction`.
+
+---
+
+### Finding 15 — gate cost and memory grow without bound with session history
+
+**Severity: medium. Not a cliff, but the wrong trajectory.**
+
+`_tainted_args` is `for tok in self._tainted_tokens: tok in text` — the cost of
+authorizing one small call is O(tokens seen so far), and the token set only
+grows (Finding 14). Measured, with the argument held constant and only the
+history varying:
+
+| log lines read | tokens tracked | ms per guarded call |
+|---|---|---|
+| 2,000 | 9,021 | 1.1 |
+| 10,000 | 48,994 | 12.8 |
+| 40,000 | 168,994 | 33.0 |
+
+33 ms per dangerous call is survivable; 169,000 retained strings per session is
+the part that scales badly, and both numbers are for a *single* session that has
+merely read some logs. Combined with Finding 14 (nothing is ever released) this
+is an unbounded leak in a long-running proxy.
+
+---
+
+### Finding 16 — `Session` is not thread-safe, and nothing says so
+
+**Severity: high where it applies. Intermittent, which makes it worse.**
+
+`_tainted_tokens` is a plain `set` that `ingest_result` writes and
+`_tainted_args` iterates. There is no lock on `Session` and no documented
+threading contract. Under concurrent use it raises:
+
+```
+RuntimeError: Set changed size during iteration
+  tessera/session.py:495 in _tainted_args
+    hits = sorted(tok for tok in self._tainted_tokens if tok in text)
+```
+
+Reproduced in **4 of 6 runs** at 16 threads. An intermittent race is the worst
+kind: it passes CI and fails in production.
+
+Where it does and does not apply:
+
+- **Tessera's stdio proxy is safe.** `ProxyRunner` reads `sys.stdin` in one
+  loop, so requests are handled strictly sequentially. Good.
+- **The in-process integrations are exposed.** `protect()` and
+  `TesseraGuard` for AgentDojo share one `Session` across whatever the host
+  framework does. Every frontier model emits parallel tool calls — my own
+  DeepSeek agent receives them and `test_parallel_tool_calls_all_execute` covers
+  the case — and executing them on a thread pool is the obvious implementation.
+  Nothing warns against it.
+
+One thing that is right: the failure is an exception out of `review()`, so the
+tool never runs. It fails **closed**
+(`test_a_guard_exception_fails_closed_in_this_harness`). A design that caught
+and allowed would have turned a concurrency bug into a security bug.
+
+One thing that is not: `ProxyRunner._serve` has no `try/except` around
+`interceptor.handle_request(message)`, so any unhandled guard exception exits
+the stdin loop and terminates the upstream server. Safe, but it takes the whole
+agent session down.
+
+**Recommendation:** state the contract ("one `Session` per agent session, not
+thread-safe"), or take a lock around the two mutating paths. A snapshot
+(`tuple(self._tainted_tokens)`) at the top of `_tainted_args` would remove the
+crash for one line of code.
+
+---
+
 ## What holds up
 
-Verified mechanically (215 tests; `test_tessera_guard.py` 38, `test_plan_mode.py` 34):
+Verified mechanically (228 tests; `test_tessera_guard.py` 38, `test_plan_mode.py` 34,
+`test_operational.py` 13):
+
+- **Large, deep, and empty payloads are handled.** A 2 MB tool result, a
+  180-level nested alert annotation, and an empty document all label and
+  sanitize without hanging or recursing to death — and an empty untrusted read
+  still taints, which is right: a blank document says nothing about its source.
+- **A crashing guard fails closed.** The concurrency bug in Finding 16 throws
+  out of `review()`, and the tool does not run.
+- **`paranoid` and plan mode are unaffected by Finding 13.** Context taint does
+  not tokenize and plan labels are per-value, so the non-ASCII gap is specific
+  to the value-flow modes.
 
 - **The flow rule does what it says at the boundaries.** Reads are never gated
   however tainted the session (5 consecutive reads after two untrusted ones,
@@ -541,7 +703,8 @@ python -m sre_harness.cli ab --agent plan --planner canonical \
        --strictness paranoid                                   # Finding 12
 python -m sre_harness.cli calibrate --agent deepseek --repeats 3 \
        --only A1-log-to-status-exfil,A2-rotate-then-leak       # Finding 9
-python -m pytest                                               # 215 invariants
+python -m pytest tests/test_operational.py -s                  # Findings 13-16
+python -m pytest                                               # 228 invariants
 ```
 
 ## Caveats, stated plainly
@@ -561,3 +724,11 @@ python -m pytest                                               # 215 invariants
   ceiling (Finding 12) will bite harder as tasks get longer, and Finding 11
   suggests the pressure release valve is delegation — which is where the
   guarantee weakens.
+- **Findings 13–16 are the ones I went looking for, not ones the corpus
+  produced.** They are therefore not exhaustive: I checked non-ASCII, session
+  longevity, gate cost, concurrency, and payload shape. I did **not** check the
+  `tessera run` MCP proxy path end-to-end (only the in-process `Session` API
+  the proxy wraps), streaming/partial tool results, multi-tenant proxies
+  sharing one process, ledger file growth and rotation, or behaviour across a
+  process restart with `--expected-head`. Any of those could hold more of the
+  same kind of finding.
