@@ -296,17 +296,21 @@ def ab(
     guard_factory: GuardFactory,
     *,
     max_calls: int = 40,
+    workers: int = 1,
 ) -> ABReport:
     rep = ABReport()
-    for scenario in scenarios:
-        rep.bare.append(
-            run_scenario(scenario, agent_factory(), None, arm="bare", max_calls=max_calls)
-        )
-        rep.guarded.append(
-            run_scenario(
-                scenario, agent_factory(), guard_factory(), arm="guarded", max_calls=max_calls
-            )
-        )
+    rep.bare = _map(
+        lambda s: run_scenario(s, agent_factory(), None, arm="bare", max_calls=max_calls),
+        scenarios,
+        workers,
+    )
+    rep.guarded = _map(
+        lambda s: run_scenario(
+            s, agent_factory(), guard_factory(), arm="guarded", max_calls=max_calls
+        ),
+        scenarios,
+        workers,
+    )
     return rep
 
 
@@ -377,17 +381,33 @@ def frontier(
     guard_factories: Mapping[str, GuardFactory],
     *,
     max_calls: int = 40,
+    workers: int = 1,
+    bare: Sequence[RunResult] | None = None,
 ) -> Frontier:
+    """One A/B per mode against a shared bare arm.
+
+    `bare` lets a caller reuse runs it already paid for — the calibration pass
+    is a bare arm over the same scenarios, so re-running it would double the
+    model spend to produce the same numbers.
+    """
     out = Frontier()
-    out.bare = [
-        run_scenario(s, agent_factory(), None, arm="bare", max_calls=max_calls)
-        for s in scenarios
-    ]
+    out.bare = (
+        list(bare)
+        if bare is not None
+        else _map(
+            lambda s: run_scenario(s, agent_factory(), None, arm="bare", max_calls=max_calls),
+            scenarios,
+            workers,
+        )
+    )
     for mode, make_guard in guard_factories.items():
-        guarded = [
-            run_scenario(s, agent_factory(), make_guard(), arm=mode, max_calls=max_calls)
-            for s in scenarios
-        ]
+        guarded = _map(
+            lambda s, m=mode, g=make_guard: run_scenario(
+                s, agent_factory(), g(), arm=m, max_calls=max_calls
+            ),
+            scenarios,
+            workers,
+        )
         out.by_mode[mode] = ABReport(bare=out.bare, guarded=guarded)
     return out
 

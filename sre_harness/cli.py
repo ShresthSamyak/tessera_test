@@ -40,6 +40,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--only", default=None, help="comma-separated scenario ids")
     p.add_argument("--out", default=None, help="write run records as JSON")
+    p.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="run scenarios concurrently; each run is fully independent, so "
+             "this only trades API rate limit for wall clock",
+    )
 
     g = p.add_argument_group("guard")
     g.add_argument("--guard", default="tessera", help="tessera | blanket | none")
@@ -200,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "calibrate":
-        cal = calibrate(scenarios, agent_factory, repeats=args.repeats)
+        cal = calibrate(scenarios, agent_factory, repeats=args.repeats, workers=args.workers)
         print(cal.report())
         if args.out:
             dump(cal.runs, args.out)
@@ -209,7 +216,7 @@ def main(argv: list[str] | None = None) -> int:
     # Both remaining commands calibrate first and run only the survivors: an
     # attack that never landed bare cannot demonstrate containment, and a
     # benign task that failed bare would inflate the apparent tax.
-    cal = calibrate(scenarios, agent_factory, repeats=args.repeats)
+    cal = calibrate(scenarios, agent_factory, repeats=args.repeats, workers=args.workers)
     print(cal.report())
     survivors = [s for s in scenarios if s.id in cal.keep_set()]
     if not survivors:
@@ -217,12 +224,25 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print()
 
+    # Calibration already ran a bare arm over these scenarios. Reuse the last
+    # repeat of each survivor rather than paying for identical runs twice.
+    bare_by_id: dict[str, object] = {}
+    for run in cal.runs:
+        bare_by_id[run.scenario_id] = run
+    shared_bare = [bare_by_id[s.id] for s in survivors]
+
     if args.command == "frontier":
         factories = {m: make_guard_factory(args, m) for m in MODES}
         if any(f is None for f in factories.values()):
             print("--guard none is meaningless for a frontier sweep", file=sys.stderr)
             return 2
-        sweep = frontier(survivors, agent_factory, factories)  # type: ignore[arg-type]
+        sweep = frontier(
+            survivors,
+            agent_factory,
+            factories,  # type: ignore[arg-type]
+            workers=args.workers,
+            bare=shared_bare,  # type: ignore[arg-type]
+        )
         print(sweep.report())
         if args.out:
             everything = [*sweep.bare]
@@ -235,7 +255,7 @@ def main(argv: list[str] | None = None) -> int:
     if guard_factory_fn is None:
         print("--guard none leaves nothing to A/B against", file=sys.stderr)
         return 2
-    report = ab(survivors, agent_factory, guard_factory_fn)
+    report = ab(survivors, agent_factory, guard_factory_fn, workers=args.workers)
     print(report.report())
     if args.out:
         dump([*report.bare, *report.guarded], args.out)
