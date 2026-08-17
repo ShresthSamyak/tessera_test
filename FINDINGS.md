@@ -767,6 +767,98 @@ tool loops.
 
 ---
 
+### Finding 21 — the four integrations disagree about the error path
+
+**Severity: medium. A soundness question with three votes one way and one the
+other, which means at least one of them is wrong.**
+
+Finding 17 came from asking "what does *this* integration think a tool result
+is?" of a surface I had not asked it of. Asking the same question about the
+**failure** path gives a three-to-one split:
+
+| integration | is a *failed* tool result labelled? |
+|---|---|
+| `Session.ingest_result` called directly | caller's choice |
+| AgentDojo `TesseraRuntime` | **no** — `if error is None:` |
+| `protect()` | **no** — the exception propagates past the ingest |
+| my `TesseraGuard` (this harness) | **no** — `if not result.ok: return None` |
+| the stdio proxy | **yes** — reads `content` regardless of `isError` |
+
+A tool error string routinely echoes its input: `"no such user: <the argument>"`,
+`"lookup failed for: <query>"`. That is free-form attacker-reachable text
+arriving in the agent's context, and in three of four integrations it arrives
+unlabelled and untracked.
+
+Whether it is *exploitable* depends on the tool surface — the attacker needs a
+way to influence what the error says. But the asymmetry is backwards from what
+you would want: the success path (often a structured confirmation) is labelled,
+and the failure path (free-form prose by construction) is not.
+
+Worth noting my own integration made the same choice independently, before I
+went looking. That is not a defence of it — it is evidence that it is the
+obvious mistake to make, which is exactly why it belongs in the docs.
+
+**Recommendation:** label error results too, or state explicitly that error
+strings are out of scope so integrators stop arriving at it by accident.
+
+---
+
+### Finding 22 — capability expiry trusts the clock of the host being defended
+
+**Severity: low-medium. Inherent, but undocumented.**
+
+`CapabilityEngine.verify` defaults `now` to `time.time()`. Measured:
+
+```
+verify(cap, now=expiry - 1)     -> authorized
+verify(cap, now=expiry + 1)     -> refused
+verify(cap, now=expiry - 3600)  -> authorized      # a backwards clock revives it
+```
+
+The whole point of capabilities is to remove ambient authority from a host you
+are assuming is compromised ("assume the model is already owned"). Expiry
+evaluated against that same host's clock is the one caveat that assumption
+undermines. `verify(..., now=)` exists for callers with a better time source,
+which is the right escape hatch — but nothing says you need one.
+
+Everything else about the construction checks out: a capability minted by a
+different engine does not verify (unforgeable without the root key),
+`attenuate` returns a strictly narrower capability without needing the secret,
+and the original is left untouched.
+
+---
+
+### Finding 23 — the README's headline evidence table is stale
+
+**Severity: low as a bug, higher than that for this particular project.**
+
+The README describes `tessera bench` as "a suite of 5 injection attacks and 3
+benign workflows" and reports:
+
+| | README | actual `tessera bench` |
+|---|---|---|
+| attacks in the suite | 5 | **7** |
+| balanced containment | 80% | **86%** |
+| balanced escalations | 1 | **2** |
+| permissive escalations | 5 | **7** |
+
+80% is 4/5 under the old suite; with 7 attacks it is not even a reachable rate
+(the possible values are k/7). Two attacks — `short-secret-exfil` and
+`confirmation-under-taint` — were added, presumably alongside the short-secret
+and echo-confirmation fixes, and the table was not updated.
+
+The drift is in the *favourable* direction, so nothing is overstated. It still
+matters more here than it would elsewhere: that table is the first evidence a
+reader sees, in a project whose entire pitch is that its numbers are honest and
+that it would "rather ship without a third-party number than ship a misleading
+one".
+
+The named caveat next to it *is* accurate — I confirmed balanced still leaks
+specifically the `data-laundering-exfil` scenario, which is the same mechanism
+as Finding 1.
+
+---
+
 ### What the proxy gets right
 
 Worth stating plainly, because Findings 17–19 are severe enough to read as a
@@ -790,9 +882,29 @@ verdict on the whole thing and they are not:
 
 ## What holds up
 
-Verified mechanically (261 tests; `test_tessera_guard.py` 38,
+Verified mechanically (280 tests; `test_tessera_guard.py` 38,
 `test_plan_mode.py` 34, `test_operational.py` 13, `test_proxy.py` 15,
-`test_sdk_and_ledger.py` 18):
+`test_sdk_and_ledger.py` 18, `test_integrations.py` 19):
+
+- **Tessera's own benchmark independently reproduces the plan-mode claim.** Its
+  suite, its runner, its definitions: plan mode contains 7/7 attacks, at a
+  strictly lower tax than paranoid, with zero escalations. That agrees with what
+  I measured on a completely different corpus, which is the strongest evidence
+  in this document for anything.
+- **The AgentDojo integration is correct on the shape the proxy drops.** Typed
+  objects and dicts are both walked and labelled, so it sides with `Session` and
+  `protect()` — three to one (Finding 17).
+- **Capabilities are unforgeable and attenuation only narrows.** A capability
+  minted by a different engine does not verify; `attenuate` adds caveats without
+  the root key and leaves the original untouched.
+- **The ledger is genuinely durable.** `FileSink.write` opens, writes, flushes
+  and `os.fsync`s per entry — ~1 ms each, measured. That is the right call for an
+  audit trail and it is the most expensive thing in the hot path, charged per
+  *entry* (a single gated call can write a label, a decision, a sanitize and a
+  capability record). It also `makedirs` its parent, so a nested `--ledger` path
+  just works. There is no rotation and no cap: at ~200 bytes/entry, sizing is
+  entirely the operator's problem, and Finding 19 means the file stays open for
+  the life of the proxy.
 
 - **The ledger's "honest scope" table is accurate, row by row.** An edited,
   deleted, or reordered entry breaks the chain. An unkeyed file can simply be
@@ -872,7 +984,9 @@ python -m sre_harness.cli calibrate --agent deepseek --repeats 3 \
 python -m pytest tests/test_operational.py -s                  # Findings 13-16
 python -m pytest tests/test_proxy.py                           # Findings 17-19
 python -m pytest tests/test_sdk_and_ledger.py                   # Finding 20, ledger scope
-python -m pytest                                               # 261 invariants
+python -m pytest tests/test_integrations.py                     # Findings 21-23
+python -m tessera.cli bench                                    # Finding 23
+python -m pytest                                               # 280 invariants
 ```
 
 ## Caveats, stated plainly
@@ -898,10 +1012,9 @@ python -m pytest                                               # 261 invariants
   lifetime, the `protect()` SDK path, `@tool` annotations, declassifier
   construction, and every row of the ledger's honest-scope table including
   keyed ledgers and `--expected-head`.
-- **Still unchecked**, and each could hold more of the same: HTTP/SSE MCP
-  transports (only stdio exists today, but `MCPInterceptor` is advertised as
-  transport-agnostic and a shared-session HTTP transport would hit Finding 16);
-  ledger file rotation and disk-full behaviour; capability `expires_at` under
-  clock skew; `tessera bench`'s own numbers; and the AgentDojo integration,
-  which is a fourth implementation of the same idea and therefore a fourth
-  chance to disagree with the other three.
+- **Still unchecked.** No HTTP/SSE MCP transport ships today — stdio is the only
+  one — so Finding 16 is a forward-looking risk there rather than a present bug,
+  but `MCPInterceptor` is explicitly documented as transport-agnostic and a
+  shared-session HTTP transport would walk straight into it. Also untested:
+  behaviour when the ledger disk fills mid-run, HMAC key rotation, and the
+  `ClaudePlanner` path (I only drove the DeepSeek planner I wrote).
