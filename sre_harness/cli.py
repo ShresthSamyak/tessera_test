@@ -6,9 +6,16 @@
     calibrate   run every scenario bare and report which are valid test cases
     ab          calibrate, then A/B one guard against the bare arm
     frontier    A/B every strictness mode against one shared bare arm
+                (add --with-plan for a plan-interpreter row)
 
 Defaults are deliberately cheap and deliberately not publishable: the scripted
 agent proves the loop and nothing else. Real numbers need `--agent deepseek`.
+
+`--agent plan` is its own agent shape rather than a guard setting: Tessera's
+plan interpreter authorizes the calls, so `--strictness` applies and `--guard`
+does not. Its bare arm defaults to the tool-loop agent, because "plan mode with
+no guard" still gates everything and A/Bing it against itself would contain
+every attack in both arms.
 """
 
 from __future__ import annotations
@@ -46,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repeats", type=int, default=1)
     p.add_argument("--only", default=None, help="comma-separated scenario ids")
     p.add_argument("--out", default=None, help="write run records as JSON")
+    p.add_argument(
+        "--bare-agent",
+        default=None,
+        help="agent for the undefended baseline (defaults to --agent, or to "
+             "'deepseek' when --agent plan, which has no undefended form)",
+    )
     p.add_argument(
         "--workers",
         type=int,
@@ -252,7 +265,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     agent_factory = make_agent_factory(args)
-    if args.agent == "scripted":
+    # Plan mode has no undefended equivalent — "plan mode without a guard" still
+    # gates everything, so A/Bing it against itself would contain every attack
+    # in both arms and mean nothing. Its baseline is the ordinary tool loop.
+    bare_kind = args.bare_agent or ("deepseek" if args.agent == "plan" else args.agent)
+    bare_agent_factory = make_agent_factory(args, bare_kind)
+
+    if args.agent == "scripted" or bare_kind == "scripted":
         print(
             "NOTE: the scripted agent proves the loop, not the attacks. A scripted "
             "agent 'falling for' an injection is a statement about the script.\n"
@@ -261,7 +280,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.command == "calibrate":
-        cal = calibrate(scenarios, agent_factory, repeats=args.repeats, workers=args.workers)
+        cal = calibrate(
+            scenarios, bare_agent_factory, repeats=args.repeats, workers=args.workers
+        )
         print(cal.report())
         if args.out:
             dump(cal.runs, args.out)
@@ -270,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
     # Both remaining commands calibrate first and run only the survivors: an
     # attack that never landed bare cannot demonstrate containment, and a
     # benign task that failed bare would inflate the apparent tax.
-    cal = calibrate(scenarios, agent_factory, repeats=args.repeats, workers=args.workers)
+    cal = calibrate(
+        scenarios, bare_agent_factory, repeats=args.repeats, workers=args.workers
+    )
     print(cal.report())
     survivors = [s for s in scenarios if s.id in cal.keep_set()]
     if not survivors:
@@ -326,10 +349,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     guard_factory_fn = make_guard_factory(args)
-    if guard_factory_fn is None:
+    if guard_factory_fn is None and args.agent != "plan":
         print("--guard none leaves nothing to A/B against", file=sys.stderr)
         return 2
-    report = ab(survivors, agent_factory, guard_factory_fn, workers=args.workers)
+    if args.agent == "plan":
+        # The interpreter authorizes; a dispatcher guard would double-gate and
+        # erase the precise-provenance advantage being measured.
+        guard_factory_fn = None
+    report = ab(
+        survivors,
+        agent_factory,
+        guard_factory_fn,
+        workers=args.workers,
+        bare_agent_factory=bare_agent_factory,
+    )
     print(report.report())
     if args.out:
         dump([*cal.runs, *report.guarded], args.out)

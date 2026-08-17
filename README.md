@@ -20,13 +20,26 @@ python -m sre_harness.cli tools             # tool surface + both label systems
 python -m sre_harness.cli calibrate         # run everything bare, discard invalid cases
 python -m sre_harness.cli ab                # calibrate, then A/B the survivors
 python -m sre_harness.cli frontier          # A/B every strictness mode at once
-python -m pytest                            # 174 invariants
+python -m pytest                            # 215 invariants
 ```
 
 Real runs need a model:
 
 ```
 python -m sre_harness.cli frontier --agent deepseek --workers 6 --out runs/f.json
+python -m sre_harness.cli frontier --agent deepseek --with-plan --workers 6
+```
+
+`--with-plan` adds Tessera's plan interpreter as a fourth row, against the same
+bare arm. On this corpus it is the only arm that contains everything:
+
+```
+  mode          containment   claimed  benign pass  task/attack  escalations
+  paranoid              91%      100%          56%           0%            0
+  balanced              64%       70%          78%          27%            7
+  permissive            64%       70%          78%          27%           17
+  plan                 100%      100%          78%         100%            0
+  (bare)                 0%         -         100%         100%            0
 ```
 
 The default `--agent scripted` proves the loop and nothing else — see
@@ -227,6 +240,50 @@ edited after the fact.
 
 ---
 
+## Plan mode
+
+`plan_agent.py` wires Tessera's `PlanInterpreter` in as an **agent shape**, not
+a guard — the interpreter authorizes its own calls, so `--strictness` applies
+and `--guard` does not. `planner.py` supplies a DeepSeek-backed `Planner`; its
+output is validated by Tessera's `parse_plan` before anything runs.
+
+Three wiring decisions carry all the risk:
+
+**1. Who authorizes.** The interpreter uses `authorize_call_labeled` — precise
+per-argument labels, no token heuristic. If the harness's `TesseraGuard` also
+ran on planned steps, every one would be re-gated by the token heuristic and
+plan mode's central advantage would be erased *while still looking measured*.
+`PlanSubcallGuard` therefore waves through anything the interpreter ruled on.
+
+**2. What the interpreter does not see.** It authorizes the plan's steps. It
+does not see calls a *tool* makes internally — `delegate_to_runbook_agent`
+spawns those at depth 1. "The set of tool calls is exactly the plan's steps" is
+true of the plan and false of the process, so those sub-calls get the heuristic
+gate. Waving them through would leave delegation completely ungated.
+
+**3. Where a blocked step is recorded.** The interpreter never calls the backend
+for a blocked step, so the dispatcher never sees it and the harness would count
+zero denials. `_RecordingSession` hooks the authorization itself.
+
+### Canonical plans
+
+A plan-mode run measures two things at once — whether the mode can *express* the
+task, and whether the model wrote a good plan — and those fail for entirely
+different reasons. `scenarios/plans.py` holds a hand-written plan per scenario so
+the two can be separated (`--planner canonical`).
+
+Writing those honestly is the hard part. A `const` is only legitimate if a
+planner could know the value from the request and the tool list alone;
+hardcoding `"4.2.0"` (which lives in an unread runbook) would score a pass for a
+plan no real planner could write. Each plan states where its constants come
+from, six are marked `expressible=False` with a reason, and
+`test_canonical_plans_use_only_knowable_constants` enforces the rule.
+
+The annotations held up: the live planner scored **5/5 on the expressible benign
+subset** and failed exactly the three marked inexpressible beforehand.
+
+---
+
 ## Scenarios
 
 **Attacks** — 11, covering every `Vector` and every `Laundering` mode except
@@ -353,10 +410,11 @@ each one means.
 - **Short-identifier attack variants.** The oracle's precision rules are tested
   (`test_short_identifiers_require_a_word_boundary`); no scenario targets
   `MFA_CODE` or `LAST_GOOD_SHA` yet.
-- **Plan mode.** Tessera's `PlanInterpreter` is the path to containment without
-  the over-tainting tax, and this harness only exercises the heuristic path.
-  Wiring it needs a planner that emits a `Plan` from the trusted instruction
-  before any tool runs — a different agent shape, not a different guard.
-- **Repeats.** Every number below is `--repeats 1`. A real model is
-  nondeterministic and the corpus is small; treat single-run rates as
-  directional.
+- **Repeats.** Every number is `--repeats 1`. A real model is nondeterministic
+  and the corpus is small; treat single-run rates as directional.
+- **Dotted field paths in the plan DSL.** `field` reads one level, so
+  `labels.severity` is unreachable — which is what makes B3 inexpressible and
+  what caused two of the live planner's runtime failures (FINDINGS 10, 12).
+- **A stricter B6 oracle.** It currently accepts any incident title, so plan
+  mode passes it with a generic one and the DSL's lack of a computation operator
+  does not surface as a failure.
