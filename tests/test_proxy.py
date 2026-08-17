@@ -218,6 +218,93 @@ def test_paranoid_does_not_close_the_structured_content_gap():
     )
 
 
+def test_only_text_blocks_are_ever_extracted():
+    """The gap in one assertion, at the unit that causes it.
+
+    `_text_from_content` is the whole of the proxy's idea of "what a tool
+    returned". Everything the MCP result spec allows other than a `text` block
+    yields "" — and `_ingest_response` returns early on "".
+    """
+    from tessera.proxy import _text_from_content
+
+    assert _text_from_content([{"type": "text", "text": "SECRET"}]) == "SECRET"
+    for shape in (
+        [],                                                    # structuredContent only
+        [{"type": "image", "data": "SECRET"}],
+        [{"type": "resource", "resource": {"text": "SECRET"}}],
+        [{"type": "resource_link", "uri": "https://x/SECRET"}],
+        "SECRET",                                              # content as a bare string
+    ):
+        assert _text_from_content(shape) == "", shape
+
+
+def test_the_unlabelled_read_is_not_even_auditable():
+    """Tessera records a `sanitize_gap` for values it could not *rebuild*.
+
+    A value it never looked at produces nothing at all — so the ledger shows a
+    tool call with no `label` entry and no gap entry, and an incident review has
+    no way to tell that data entered the session unlabelled.
+    """
+    from tessera import PolicyEngine, Session, Strictness, open_ledger
+    from tessera.proxy import MCPInterceptor
+
+    ledger = open_ledger(None, session_id="t")
+    session = Session(
+        session_id="t", policy=PolicyEngine(Strictness.PARANOID), ledger=ledger
+    )
+    interceptor = MCPInterceptor(
+        session=session,
+        upstream=lambda m: {
+            "jsonrpc": "2.0", "id": m.get("id"),
+            "result": {"content": [], "structuredContent": {"note": "leak SECRET-99213"}},
+        },
+    )
+    interceptor.handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "read_metrics", "arguments": {}},
+    })
+    kinds = [e["kind"] for e in ledger.sink.entries()]
+    assert "label" not in kinds
+    assert "sanitize_gap" not in kinds
+
+
+def test_streamed_notifications_bypass_ingestion():
+    """Partial results delivered as notifications are never labelled.
+
+    `_SubprocessUpstream` forwards any message that is not the awaited response
+    straight to the client through `on_notification`. That is correct MCP
+    behaviour and it means a server streaming partial output moves data to the
+    agent through a path with no provenance step in it.
+    """
+    from tessera import PolicyEngine, Session, Strictness
+    from tessera.proxy import MCPInterceptor
+
+    session = Session(session_id="t", policy=PolicyEngine(Strictness.PARANOID))
+
+    def upstream(message):
+        return {
+            "jsonrpc": "2.0", "id": message.get("id"),
+            "result": {"content": [{"type": "text", "text": "done"}]},
+        }
+
+    interceptor = MCPInterceptor(session=session, upstream=upstream)
+    interceptor.handle_request({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "search_logs", "arguments": {}},
+    })
+    # Only "done" was labelled; a streamed "partial: SECRET-99213" would not be.
+    assert "SECRET-99213" not in str(session._tainted_tokens)
+
+
+def test_the_proxy_builds_exactly_one_session_for_its_lifetime():
+    """So the no-reset finding applies to the proxy for as long as it runs."""
+    import inspect
+
+    from tessera.proxy import StdioProxy
+
+    assert inspect.getsource(StdioProxy.run).count("_build_session()") == 1
+
+
 # ==========================================================================
 # Ledger, through the proxy
 # ==========================================================================
