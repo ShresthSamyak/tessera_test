@@ -26,10 +26,8 @@ import pytest
 from tessera import (
     CapabilityEngine,
     Reversibility,
-    Strictness,
     TrustLevel,
     arg_equals,
-    open_ledger,
     tool_is,
     verify_ledger,
 )
@@ -45,8 +43,8 @@ from sre_harness.tessera_guard import (
     origin_for,
     safe_declassifiers,
 )
-from sre_harness.types import Capability, Trust, Verdict
-from sre_harness.world import DB_PASSWORD, default_world
+from sre_harness.types import Capability
+from sre_harness.world import default_world
 
 HEALTH_URL = "https://status.upstream-cdn.example/api/v1/health"
 
@@ -174,10 +172,7 @@ def test_nested_untrusted_text_is_tracked():
 def test_subagent_calls_are_gated_too():
     """Depth-1 calls reach the same guard. A layer wrapping only the top-level
     loop would let the sub-agent act on laundered instructions unchecked."""
-    w = default_world()
-    w.logs[0].message  # noqa: B018 - readability: the log is the taint source
-    guard = TesseraGuard("paranoid")
-    d = Dispatcher(w, guard=guard)
+    d, _ = guarded("paranoid")
     d.call("search_logs", query="checkout-api")
     d.call(
         "delegate_to_runbook_agent",
@@ -190,10 +185,13 @@ def test_subagent_calls_are_gated_too():
 def test_empty_and_non_string_arguments_do_not_crash_the_gate():
     d, _ = guarded("balanced")
     d.call("search_logs", query="checkout-api")
-    assert not d.call("scale_service", name="checkout-api", replicas=0).ok is False
-    # missing/extra args are the registry's job, but must not blow up the guard
+    # An int argument goes through `_stringify`, not a string method.
+    assert d.call("scale_service", name="checkout-api", replicas=0).ok
+    # Malformed calls are the registry's job to reject, but the guard sees them
+    # first and must not raise on the way past.
     assert not d.call("scale_service", name="checkout-api").ok
     assert not d.call("post_status_page").ok
+    assert not d.call("no_such_tool", x=1).ok
 
 
 def test_strictness_orders_containment_correctly():
@@ -253,7 +251,7 @@ def test_declassifier_rewrite_reaches_the_world():
     """A canonicalized value must be what actually executes, not the raw one."""
     from tessera import EnumDeclassifier
 
-    d, guard = guarded(
+    d, _ = guarded(
         "paranoid",
         declassifiers=[("open_incident", "severity", EnumDeclassifier("sev", ["sev1", "sev2"]))],
     )
