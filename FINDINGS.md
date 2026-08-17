@@ -1305,9 +1305,12 @@ python -m pytest                                               # 308 invariants
   one — so Finding 16 is a forward-looking risk there rather than a present bug,
   but `MCPInterceptor` is explicitly documented as transport-agnostic and a
   shared-session HTTP transport would walk straight into it. Also untested: the
-  `tessera bench` numbers under a real model rather than its scripted harness,
-  and a soak driven by a *real model* rather than the scripted agent — Finding 27
-  used `ScriptedAgent` so that 240 tasks cost nothing, which means it measures
-  the policy's behaviour over a long session and not the model's. Given
-  Finding 2 (a real agent explores far more, and every extra read is taint), the
-  live decay is likely to be faster, not slower.
+  `tessera bench` numbers under a real model rather than its scripted harness.
+- **Resolved since first writing.** Finding 27 originally ran on `ScriptedAgent`,
+  and I flagged that it therefore measured the policy over a long session rather
+  than a model. That has now been run live — 360 tasks on `deepseek-chat`, 80
+  minutes, against the published package — and the prediction held in the
+  direction stated and was stronger than expected: the session is tainted at
+  task 0, so the decay has no grace period at all. The live attack corpus under
+  a shared session is still not run; containment over long sessions remains a
+  scripted-agent result.
