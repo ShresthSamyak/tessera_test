@@ -567,6 +567,9 @@ There is no supported way to say "this unit of work is finished, start the next
 one clean" — which is a normal thing to want and a safe thing to grant, since a
 new user instruction is trusted input.
 
+**Finding 27 measures what this costs: 42 points of legitimate work**, and it is
+lost in one step rather than gradually.
+
 **Recommendation:** a first-class task/turn boundary — `Session.begin_task()`
 that resets `context_level` and `_tainted_tokens` while keeping the ledger
 chain continuous. It is also the natural home for Finding 3's
@@ -593,6 +596,14 @@ history varying:
 the part that scales badly, and both numbers are for a *single* session that has
 merely read some logs. Combined with Finding 14 (nothing is ever released) this
 is an unbounded leak in a long-running proxy.
+
+**Corrected by Finding 27.** I stated the growth claim too strongly here. The
+set grows with the number of *distinct* strings seen, not with tasks — replay
+one fixture and it saturates flat forever. My measurement above used highly
+varied log lines, which is the realistic case (fresh request/tenant/trace ids
+every incident) but is not automatic. Over 240 varied tasks the real rate is
+~20 tokens/task and gate latency rises 0.07 ms -> 0.38 ms: a straight line, and
+still trivial in absolute terms.
 
 ---
 
@@ -739,7 +750,7 @@ for the rest of the process; in `balanced` the token set grows without bound
 (Finding 15) and over-blocking with it.
 
 This is the deployment shape the README recommends, and it is the one where
-Findings 14 and 15 bite hardest.
+Findings 14 and 15 bite hardest — quantified in Finding 27.
 
 ---
 
@@ -1036,10 +1047,14 @@ verdict on the whole thing and they are not:
 
 ## What holds up
 
-Verified mechanically (294 tests; `test_tessera_guard.py` 38,
+Verified mechanically (308 tests; `test_tessera_guard.py` 38,
 `test_plan_mode.py` 34, `test_operational.py` 13, `test_proxy.py` 15,
 `test_sdk_and_ledger.py` 18, `test_integrations.py` 19,
-`test_planner_and_ledger_edges.py` 14):
+`test_planner_and_ledger_edges.py` 14, `test_soak.py` 14):
+
+- **Containment is stable over a long session.** Across 240 tasks through one
+  persistent session, attacks land no more often late than early. Only utility
+  collapses (Finding 27) — the tool becomes unusable before it becomes unsafe.
 
 - **Both planners share one security boundary.** `ClaudePlanner` and my
   `DeepSeekPlanner` produce identical `Plan` objects from identical JSON, and
@@ -1151,8 +1166,9 @@ python -m pytest tests/test_proxy.py                           # Findings 17-19
 python -m pytest tests/test_sdk_and_ledger.py                   # Finding 20, ledger scope
 python -m pytest tests/test_integrations.py                     # Findings 21-23
 python -m pytest tests/test_planner_and_ledger_edges.py         # Findings 24-26
+python -m sre_harness.cli soak --strictness balanced --cycles 12  # Finding 27
 python -m tessera.cli bench                                    # Finding 23
-python -m pytest                                               # 294 invariants
+python -m pytest                                               # 308 invariants
 ```
 
 ## Caveats, stated plainly
@@ -1209,6 +1225,8 @@ python -m pytest                                               # 294 invariants
   but `MCPInterceptor` is explicitly documented as transport-agnostic and a
   shared-session HTTP transport would walk straight into it. Also untested: the
   `tessera bench` numbers under a real model rather than its scripted harness,
-  and any deployment longer than a single benchmark run — Findings 14, 15 and 19
-  all predict that the interesting failures start after hour one, and nothing
-  here ran that long.
+  and a soak driven by a *real model* rather than the scripted agent — Finding 27
+  used `ScriptedAgent` so that 240 tasks cost nothing, which means it measures
+  the policy's behaviour over a long session and not the model's. Given
+  Finding 2 (a real agent explores far more, and every extra read is taint), the
+  live decay is likely to be faster, not slower.
