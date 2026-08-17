@@ -50,9 +50,12 @@ class BlanketTaintGuard:
 
         return Decision.allow()
 
-    def observe(self, call: ToolCall, result: ToolResult, ctx: GuardContext) -> None:
+    def observe(
+        self, call: ToolCall, result: ToolResult, ctx: GuardContext
+    ) -> ToolResult | None:
         if result.ok and result.trust is Trust.UNTRUSTED:
             self.saw_untrusted = True
+        return None   # no result-side rewriting; this guard only gates calls
 
 
 __all__ = ["BlanketTaintGuard"]
