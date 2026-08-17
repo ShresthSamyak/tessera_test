@@ -273,19 +273,27 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "soak":
         from .soak import run_soak
-        from .tessera_guard import guard_factory as tguard
+        from .tessera_guard import guard_factory as tguard, safe_declassifiers
 
         scenarios = select_scenarios(args)
         if scenarios is None:
             return 2
+        if args.agent == "scripted":
+            print(
+                "NOTE: a scripted soak measures the *policy* over a long session, "
+                "not a model's behaviour in one. Use --agent deepseek for the "
+                "live decay — Finding 2 predicts it is faster.\n",
+                file=sys.stderr,
+            )
         report = run_soak(
             scenarios,
             tguard(
                 args.strictness,
-                declassifiers=None,
+                declassifiers=safe_declassifiers() if args.declassifiers == "safe" else None,
                 instruction_allowlist=args.instruction_allowlist,
             ),
             cycles=args.cycles,
+            agent_factory=make_agent_factory(args),
             vary_world=not args.replay_logs,
         )
         print(report.report(bucket_size=max(1, len([s for s in scenarios
