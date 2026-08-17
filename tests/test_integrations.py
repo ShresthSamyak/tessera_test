@@ -19,6 +19,7 @@ import pytest
 
 from tessera import (
     CapabilityEngine,
+    open_ledger,
     PolicyEngine,
     Session,
     Strictness,
@@ -117,7 +118,9 @@ def test_all_four_implementations_agree_on_a_dict_result():
     payload = {"note": INJECTION}
 
     direct = Session(session_id="a", policy=PolicyEngine(Strictness.BALANCED))
-    direct.register_tool(operator_profile("read_logs", reversibility=Reversibility.READ_ONLY))
+    direct.register_tool(operator_profile(
+        "read_logs", reversibility=Reversibility.READ_ONLY, exfiltration_capable=False
+    ))
     direct.ingest_result("read_logs", payload)
     assert direct.is_tainted
 
@@ -243,7 +246,7 @@ def test_attenuation_only_narrows():
     broad = engine.mint(tool_is("post_status_page"))
     assert engine.verify(broad, "post_status_page", {"text": "anything"}).authorized
 
-    narrow = engine.attenuate(broad, arg_equals("text", "only this"))
+    narrow = broad.attenuate(arg_equals("text", "only this"))
     assert engine.verify(narrow, "post_status_page", {"text": "only this"}).authorized
     assert not engine.verify(narrow, "post_status_page", {"text": "anything"}).authorized
     # The original is untouched — attenuation returns a new capability.
@@ -280,7 +283,9 @@ def test_max_uses_is_spent_by_denied_attempts(monkeypatch):
             exfiltration_capable=True,
         )
     )
-    session.register_tool(operator_profile("read_logs", reversibility=Reversibility.READ_ONLY))
+    session.register_tool(operator_profile(
+        "read_logs", reversibility=Reversibility.READ_ONLY, exfiltration_capable=False
+    ))
     session.grant(engine.mint(tool_is("post_status_page"), max_uses(1)))
 
     session.ingest_result("read_logs", INJECTION)          # taint the session
@@ -320,20 +325,41 @@ def test_capabilities_and_the_flow_rule_are_independent_gates():
 # ==========================================================================
 
 
-def test_ledger_survives_an_unwritable_path_without_losing_the_decision(tmp_path):
-    """What happens when the audit trail cannot be written?
+def test_ledger_creates_its_parent_directory(tmp_path):
+    """`FileSink.__post_init__` makedirs the parent, so a nested `--ledger`
+    path just works rather than failing at the first decision."""
+    from tessera import open_ledger, verify_ledger
 
-    The interesting question is the ordering: if a ledger write failure
-    propagates *before* the decision is returned, an unwritable disk becomes a
-    denial of service. If it is swallowed, actions proceed unaudited. Either is
-    defensible; which one it is should not be a surprise.
+    path = tmp_path / "deep" / "nested" / "audit.jsonl"
+    ledger = open_ledger(str(path), session_id="t")
+    ledger.label(tool="read", level="UNTRUSTED", origin="DOCUMENT", node_id="v0")
+    assert path.exists()
+    assert verify_ledger(str(path)).ok
+
+
+def test_every_ledger_entry_is_fsynced(tmp_path):
+    """`FileSink.write` opens, writes, flushes and `os.fsync`s per line.
+
+    That is the right call for an audit trail — an entry that is only in the
+    page cache when the host dies did not happen. It is also the single most
+    expensive thing in the hot path, and it is per *entry*, not per tool call:
+    one gated call writes a label, a decision, and possibly a sanitize and a
+    capability entry.
     """
-    from tessera import open_ledger
+    import inspect
+    from tessera.ledger import FileSink
 
-    directory = tmp_path / "nope"          # parent does not exist
-    with pytest.raises(Exception):
-        ledger = open_ledger(str(directory / "audit.jsonl"), session_id="t")
-        ledger.label(tool="read", level="UNTRUSTED", origin="DOCUMENT", node_id="v0")
+    source = inspect.getsource(FileSink.write)
+    assert "fsync" in source
+
+    path = tmp_path / "audit.jsonl"
+    ledger = open_ledger(str(path), session_id="t")
+    start = time.perf_counter()
+    for i in range(200):
+        ledger.label(tool=f"r{i}", level="UNTRUSTED", origin="DOCUMENT", node_id=f"v{i}")
+    per_entry_ms = (time.perf_counter() - start) / 200 * 1000
+    print(f"\n  {per_entry_ms:.2f} ms per fsynced ledger entry")
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 200
 
 
 def test_ledger_grows_one_line_per_event(tmp_path):
@@ -350,3 +376,72 @@ def test_ledger_grows_one_line_per_event(tmp_path):
     assert len(lines) == 500
     per_entry = path.stat().st_size / 500
     assert per_entry > 100          # ~200 bytes/entry; 1M events is ~200 MB
+
+
+# ==========================================================================
+# Tessera's own benchmark, against Tessera's own README
+# ==========================================================================
+
+
+def test_bench_suite_is_larger_than_the_readme_says():
+    """The README's headline evidence table is stale.
+
+    It describes "a suite of 5 injection attacks and 3 benign workflows" and
+    reports balanced at 80% containment with 1 escalation. The shipped suite has
+    **7** attacks, and `tessera bench` prints 86% with 2 escalations — 80% was
+    4/5 under the old suite, and two attacks (`short-secret-exfil`,
+    `confirmation-under-taint`) were added without the table being updated.
+
+    The drift is in the favourable direction, so nothing is overstated. It still
+    matters: that table is the first evidence a reader sees, from a project
+    whose entire pitch is that its numbers are honest.
+    """
+    from tessera.eval.scenarios import attacks, benign
+
+    assert len(attacks()) == 7, "suite size changed again; re-check the README"
+    assert len(benign()) == 3
+    # 80% is unreachable with 7 attacks: the possible rates are k/7.
+    assert 0.80 not in {k / 7 for k in range(8)}
+
+
+def test_bench_plan_mode_pareto_dominates():
+    """The claim the README makes about plan mode, checked against the code.
+
+    Independent of my harness: Tessera's own suite, own runner, own definitions
+    of containment and tax. It agrees with what I measured on the SRE corpus —
+    plan mode contains everything paranoid does, keeps more benign work than
+    paranoid, and escalates nothing.
+    """
+    from tessera.eval.harness import evaluate_frontier
+
+    points = evaluate_frontier()
+    by_mode = {(p.label or p.strictness.value): p for p in points}
+
+    plan = by_mode["plan"]
+    paranoid = by_mode["paranoid"]
+    balanced = by_mode["balanced"]
+
+    assert plan.containment_rate == 1.0
+    assert plan.containment_rate >= paranoid.containment_rate
+    assert plan.utility_tax <= balanced.utility_tax
+    assert plan.escalations == 0
+    # The Pareto claim in one line: strictly better than paranoid on tax, no
+    # worse on containment.
+    assert plan.utility_tax < paranoid.utility_tax
+
+
+def test_bench_balanced_leaks_the_laundering_attack():
+    """The README says balanced "is evaded by the data-laundering attack".
+
+    Confirming the *named* residual matters: it is the one place the docs admit
+    a specific attack gets through, and it is the same mechanism as my Finding 1.
+    """
+    from tessera.eval.harness import evaluate_frontier
+
+    balanced = {(p.label or p.strictness.value): p for p in evaluate_frontier()}["balanced"]
+    leaked = [
+        r.scenario_id for r in balanced.results
+        if r.kind == "attack" and r.critical_executed
+    ]
+    assert leaked, "balanced contained everything — the README's caveat is stale"
+    assert any("laundering" in sid for sid in leaked), leaked
