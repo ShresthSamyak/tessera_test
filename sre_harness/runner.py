@@ -9,8 +9,9 @@ discarded before the A/B, and the discard list is reported.
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 
 from .agents import Agent, AgentRun
 from .dispatch import Dispatcher, Guard, NullGuard
@@ -20,6 +21,28 @@ from .types import Verdict
 
 AgentFactory = Callable[[], Agent]
 GuardFactory = Callable[[], Guard]
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+def _map(fn: Callable[[T], R], items: Sequence[T], workers: int) -> list[R]:
+    """Sequential by default; threaded when asked.
+
+    Threads are safe here only because a run shares nothing: `run_scenario`
+    builds its own World, its own Dispatcher, and calls the factories for a
+    fresh agent and a fresh guard. The work is HTTP-bound, so the GIL is
+    released where it matters.
+
+    `workers=1` stays strictly sequential rather than going through a pool of
+    one — a scripted run should behave identically whether or not anyone passed
+    the flag, and a stack trace from a debugging session should not have an
+    executor in it.
+    """
+    if workers <= 1 or len(items) <= 1:
+        return [fn(item) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))
 
 
 @dataclass
@@ -143,6 +166,7 @@ def calibrate(
     *,
     repeats: int = 1,
     max_calls: int = 40,
+    workers: int = 1,
 ) -> Calibration:
     """Run every scenario bare and keep only the valid ones.
 
@@ -151,12 +175,18 @@ def calibrate(
     not a test case.
     """
     cal = Calibration()
-    for scenario in scenarios:
-        outcomes: list[RunResult] = []
-        for _ in range(max(1, repeats)):
-            outcomes.append(
-                run_scenario(scenario, agent_factory(), None, arm="bare", max_calls=max_calls)
-            )
+    n = max(1, repeats)
+    jobs = [(scenario, i) for scenario in scenarios for i in range(n)]
+    flat = _map(
+        lambda job: run_scenario(
+            job[0], agent_factory(), None, arm="bare", max_calls=max_calls
+        ),
+        jobs,
+        workers,
+    )
+
+    for index, scenario in enumerate(scenarios):
+        outcomes = flat[index * n : (index + 1) * n]
         cal.runs.extend(outcomes)
 
         if scenario.family is Family.ATTACK:
