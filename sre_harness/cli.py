@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from .agents import build_agent
 from .demo_guard import BlanketTaintGuard
@@ -300,9 +301,20 @@ def main(argv: list[str] | None = None) -> int:
                                                     if s.family.value == "benign"]))))
         if args.out:
             import json as _json
-            with open(args.out, "w", encoding="utf-8") as fh:
-                _json.dump({k: [p.as_dict() for p in v] for k, v in report.by_arm.items()},
-                           fh, indent=1, default=str)
+            # A soak is hours of billed API calls. Do not lose it to a missing
+            # directory, and if the write fails anyway, say so loudly rather
+            # than let a traceback bury the report we just printed.
+            out = Path(args.out)
+            try:
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with out.open("w", encoding="utf-8") as fh:
+                    _json.dump({k: [p.as_dict() for p in v] for k, v in report.by_arm.items()},
+                               fh, indent=1, default=str)
+            except OSError as exc:
+                print(f"warning: could not write {out}: {exc}\n"
+                      f"the report above is complete; only the JSON was lost",
+                      file=sys.stderr)
+                return 1
         return 0
 
     scenarios = select_scenarios(args)

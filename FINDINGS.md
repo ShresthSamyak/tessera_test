@@ -567,8 +567,9 @@ There is no supported way to say "this unit of work is finished, start the next
 one clean" — which is a normal thing to want and a safe thing to grant, since a
 new user instruction is trusted input.
 
-**Finding 27 measures what this costs: 42 points of legitimate work**, and it is
-lost in one step rather than gradually.
+**Finding 27 measures what this costs: 42 points of legitimate work** under a
+scripted agent, and it is lost in one step rather than gradually. Under a live
+model the session is tainted at task 0, so there is no first step to notice.
 
 **Recommendation:** a first-class task/turn boundary — `Session.begin_task()`
 that resets `context_level` and `_tainted_tokens` while keeping the ledger
@@ -597,13 +598,25 @@ the part that scales badly, and both numbers are for a *single* session that has
 merely read some logs. Combined with Finding 14 (nothing is ever released) this
 is an unbounded leak in a long-running proxy.
 
-**Corrected by Finding 27.** I stated the growth claim too strongly here. The
-set grows with the number of *distinct* strings seen, not with tasks — replay
-one fixture and it saturates flat forever. My measurement above used highly
-varied log lines, which is the realistic case (fresh request/tenant/trace ids
-every incident) but is not automatic. Over 240 varied tasks the real rate is
-~20 tokens/task and gate latency rises 0.07 ms -> 0.38 ms: a straight line, and
-still trivial in absolute terms.
+**Corrected twice by Finding 27, and the severity here should come down.**
+
+First, I stated the growth claim too strongly. The set grows with the number of
+*distinct* strings seen, not with tasks — replay one fixture and it saturates
+flat forever. My measurement above used highly varied log lines, which is the
+realistic case (fresh request/tenant/trace ids every incident) but is not
+automatic. Over 240 varied tasks the real rate is ~20 tokens/task, and the live
+360-task run confirmed it at ~26 tokens/task.
+
+Second, and more importantly, the "33 ms per dangerous call" figure above is
+from a microbenchmark with a deliberately enormous token set, and it made the
+latency sound like the headline. End to end it is not. The live soak grew the
+tracked set 48× (97 → 4,619 tokens) and gate latency rose only 0.06 → 0.20 ms —
+strongly sublinear. At that slope a 10 ms gate needs something like 8,000 tasks
+in one session, and Finding 27's utility collapse makes the session useless long
+before then. **This is a memory and hygiene problem, not a latency problem.**
+It is still worth fixing — an unbounded retained set of every string a
+long-running proxy has ever read is bad on its own terms — but I had it weighted
+alongside the utility collapse, and it does not belong there.
 
 ---
 
@@ -1021,6 +1034,74 @@ grant, because a new user instruction is trusted input by definition.
 
 Reproduce: `python -m sre_harness.cli soak --strictness balanced --cycles 12`
 (add `--replay-logs` to see the saturating, flattering version).
+
+#### Confirmed against a live model (added after the fact)
+
+The table above used `ScriptedAgent`, so 240 tasks cost nothing — which meant it
+measured *the policy's* behaviour over a long session, not a model's. I predicted
+the live decay would be faster, on the grounds that a real agent explores more
+and every extra read is taint. **It is faster, and by more than I expected: the
+session is already tainted at task 0.**
+
+360 tasks (180/arm), `deepseek-chat`, `balanced`, benign corpus, on GitHub
+Actions against `tessera-proxy==0.2.3` from PyPI — 80 minutes, ~$1.80
+([run 32004337866](https://github.com/ShresthSamyak/tessera_test/actions/runs/32004337866),
+raw output in `results/soak-live-32004337866.txt`):
+
+| arm | benign pass | end tokens | end gate latency | ledger entries |
+|---|---|---|---|---|
+| `fresh` | **64.4%** | 10 | 0.05 ms | 24 |
+| `shared` | **41.1%** | 4,662 | 0.20 ms | 6,098 |
+
+```
+bucket    0    1    2    3    4    5    6    7    8    9   10   11   12   13   14   15   16   17   18   19
+fresh    67%  67%  67%  67%  67%  67%  67%  56%  56%  67%  56%  67%  78%  67%  67%  67%  56%  56%  67%  67%
+shared   33%  44%  33%  44%  33%  33%  44%  44%  44%  44%  33%  44%  44%  56%  44%  33%  44%  44%  44%  33%
+```
+
+Three things change, and one of them corrects me.
+
+**The cliff is not visible, because it happens before the first bucket ends.**
+The scripted arm showed one high bucket (67%) and then the floor. The live arm
+has no high bucket at all: `tainted=True` at task 0, and bucket 0 is already 33%.
+The scripted agent read untrusted data partway through pass one; the real agent
+reads it in the first task, every time. The practical form of this finding is
+therefore worse than the scripted curve suggested — there is no grace period at
+all, not even a short one. A proxy is at its floor from the first incident it
+looks at.
+
+**The gap is smaller — 23 points, not 42 — and that is not good news.** It
+narrowed from the top, not the bottom: the live `fresh` baseline is 64.4% where
+the scripted one was 77.8%, because a real model fails some benign tasks on its
+own merits (Finding 2). The floor barely moved, 36.1% → 41.1%. So the correct
+reading is that the *absolute* cost of session lifetime is roughly what the
+scripted run said, and the smaller delta is model error eating into the
+headroom above it. Quoting "23 points" as an improvement would be backwards.
+
+**The floor is noisy where the scripted floor was exact.** The scripted arm sat
+at precisely 33.3% — the three reversible-only survivors, deterministically.
+The live arm oscillates 33–56% around a 41.1% mean. That is not the policy being
+kinder: it is the model sometimes not performing the tainting read at all on a
+given task, so a fourth scenario occasionally squeaks through. The deterministic
+floor is the real one; live variance sits on top of it.
+
+**Growth is linear and confirmed, and Finding 15's severity should come down.**
+97 → 4,619 tokens across 176 tasks is ~26 tokens/task, matching the ~20/task
+estimate on genuinely varied content. But gate latency went 0.06 → 0.20 ms for a
+48× increase in tracked tokens — strongly sublinear, so the token set is not the
+dominant cost at this scale. Extrapolating the observed slope, a 10 ms gate needs
+on the order of 8,000 tasks in one session. **The unbounded growth is a real
+leak and the right thing to fix, but it is a memory-and-hygiene problem, not a
+latency problem** — and Finding 27's utility collapse will have made the session
+useless thousands of tasks before latency is noticeable. I had these weighted
+about equally; they are not equal.
+
+One caveat on this run: the corpus was restricted to the nine benign scenarios,
+so `attacks landed 0/0` is an artifact of there being no attacks, not a
+containment result. Containment across a long shared session remains measured
+only under the scripted agent
+(`tests/test_soak.py::test_containment_holds_across_a_long_session`), where it
+held. A live attack soak is the obvious next run and has not been done.
 
 ---
 

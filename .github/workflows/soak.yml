@@ -77,6 +77,13 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PYTHONIOENCODING: utf-8
         run: |
+          # Without pipefail the pipeline reports `tee`'s status, so a soak that
+          # died halfway would upload a truncated report and still go green.
+          set -o pipefail
+          # `runs/` is gitignored, so it does not exist in a fresh checkout.
+          # Without this, an otherwise complete 80-minute run dies on its last
+          # statement and uploads nothing. Learned the expensive way in 32004337866.
+          mkdir -p runs
           python -u -m sre_harness.cli soak \
             --agent "${{ inputs.agent }}" \
             --strictness "${{ inputs.strictness }}" \
