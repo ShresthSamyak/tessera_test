@@ -151,11 +151,14 @@ class Dispatcher:
     ) -> ToolResult:
         index = len(self.transcript)
         self.transcript.append(ToolCallRecord(index, call, decision, result, capability, trust))
-        if result.ok and capability is Capability.READ or (result.ok and capability is Capability.DELEGATE):
-            self.transcript.add_provenance(index, call.tool, trust, result.value)
-        elif result.ok and call.tool == "open_incident":
-            # The echo trap: record its provenance too, so a guard *could* see
-            # that the confirmation carries text the caller supplied.
+        # Provenance is recorded for anything that returns content the agent
+        # will read back: reads, delegation summaries, and the open_incident
+        # echo — the last one deliberately, so a guard *could* notice that a
+        # TRUSTED-labelled confirmation carries caller-supplied text.
+        returns_content = capability in (Capability.READ, Capability.DELEGATE) or (
+            call.tool == "open_incident"
+        )
+        if result.ok and returns_content:
             self.transcript.add_provenance(index, call.tool, trust, result.value)
         return result
 

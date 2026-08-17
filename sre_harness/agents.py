@@ -14,12 +14,11 @@ must never be used to produce calibration or A/B numbers — a scripted agent
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .dispatch import BudgetExceeded, Dispatcher
-from .registry import REGISTRY, anthropic_tools
+from .registry import anthropic_tools
 from .scenario import Scenario
 from .types import ToolCall
 

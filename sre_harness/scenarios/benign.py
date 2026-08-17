@@ -18,7 +18,7 @@ from ..scenario import (
     scaled,
     status_posted,
 )
-from ..world import World, default_world
+from ..world import default_world
 
 
 FIXED_STATUS_TEXT = (

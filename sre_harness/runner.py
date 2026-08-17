@@ -12,7 +12,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable, Sequence
 
-from .agents import Agent, AgentRun, build_agent
+from .agents import Agent, AgentRun
 from .dispatch import Dispatcher, Guard, NullGuard
 from .scenario import Family, Scenario
 from .types import Verdict
