@@ -20,7 +20,7 @@ python -m sre_harness.cli tools             # tool surface + both label systems
 python -m sre_harness.cli calibrate         # run everything bare, discard invalid cases
 python -m sre_harness.cli ab                # calibrate, then A/B the survivors
 python -m sre_harness.cli frontier          # A/B every strictness mode at once
-python -m pytest                            # 215 invariants
+python -m pytest                            # 261 invariants
 ```
 
 Real runs need a model:

@@ -692,10 +692,12 @@ Three things make this worse than a normal bug:
    not *rebuild*. A value it never looked at produces nothing: the ledger holds
    a `decision` and no `label`, so an incident review cannot tell that
    unlabelled data entered the session.
-3. **`Session` is not at fault.** `ingest_result` handles arbitrary nested
-   structures correctly — my in-process integration passes dicts and lists and
-   they are walked to their string leaves. The bug is entirely in the proxy's
-   extraction, which is why none of Findings 1–16 could have found it.
+3. **`Session` is not at fault, and the other integration proves it.** The
+   identical typed return, sent through `protect()`, *is* walked, labelled and
+   gated — `test_protect_structured_return_is_labelled_unlike_the_proxy`. Two
+   advertised integrations, the same data, opposite outcomes. The bug is
+   entirely in the proxy's extraction, which is why none of Findings 1–16 could
+   have found it.
 
 **Recommendation:** ingest the whole `result` object, not `_text_from_content`
 of one field. `ingest_result` already walks arbitrary structures and preserves
@@ -741,6 +743,30 @@ Findings 14 and 15 bite hardest.
 
 ---
 
+### Finding 20 — `protect()` reports a block by *returning a string*, which a caller can miss entirely
+
+**Severity: low. Documented and defensible, but a real footgun.**
+
+`Guard.on_block` defaults to `"error"`: a blocked call returns
+`"[blocked by Tessera] <reason>"` instead of raising. For a tool loop that is
+the right default — the message goes back to the model, which can adapt, and it
+is exactly what the README promises.
+
+The footgun is that a *blocked* call and a *successful* call are both strings,
+distinguished only by a prefix. Code that ignores the return value, logs it, or
+passes it onward gets no signal whatsoever that an action was refused. I wrote
+three tests expecting an exception before noticing.
+
+What is right: the block is real. `test_a_blocked_call_has_no_effect` confirms
+the underlying function never executes — the string is not a report of something
+that happened. And `on_block="raise"` is one keyword away.
+
+**Recommendation:** make the sentinel a distinct type that is still `str`-like,
+so `isinstance(result, Blocked...)` works without forcing exception handling on
+tool loops.
+
+---
+
 ### What the proxy gets right
 
 Worth stating plainly, because Findings 17–19 are severe enough to read as a
@@ -764,8 +790,27 @@ verdict on the whole thing and they are not:
 
 ## What holds up
 
-Verified mechanically (228 tests; `test_tessera_guard.py` 38, `test_plan_mode.py` 34,
-`test_operational.py` 13):
+Verified mechanically (261 tests; `test_tessera_guard.py` 38,
+`test_plan_mode.py` 34, `test_operational.py` 13, `test_proxy.py` 15,
+`test_sdk_and_ledger.py` 18):
+
+- **The ledger's "honest scope" table is accurate, row by row.** An edited,
+  deleted, or reordered entry breaks the chain. An unkeyed file can simply be
+  re-chained and verifies clean — as documented. A **keyed** ledger resists
+  that: the forged file passes bare verification and fails against the real
+  key. Truncation is silent without an external anchor and caught with
+  `--expected-head`, and the `verify` CLI exits 0/1 accordingly. The HMAC key
+  is deliberately not accepted on the command line, only from an env var.
+- **`protect()` enforces the flow rule and blocks for real.** The refused
+  function never executes; the message is not a report of something that
+  happened.
+- **`@tool(reversibility=..., exfiltration_capable=...)` reaches the
+  classifier**, so an innocuously-named dangerous tool is still gated —
+  positional arguments included.
+- **`PatternDeclassifier` refuses a loose regex at construction** (`.*`,
+  `[\s\S]+`), and the documented residual is real: a well-formed-email pattern
+  passes the probe guard and still launders, because the attacker's address is
+  inside its output space.
 
 - **Large, deep, and empty payloads are handled.** A 2 MB tool result, a
   180-level nested alert annotation, and an empty document all label and
@@ -825,7 +870,9 @@ python -m sre_harness.cli ab --agent plan --planner canonical \
 python -m sre_harness.cli calibrate --agent deepseek --repeats 3 \
        --only A1-log-to-status-exfil,A2-rotate-then-leak       # Finding 9
 python -m pytest tests/test_operational.py -s                  # Findings 13-16
-python -m pytest                                               # 228 invariants
+python -m pytest tests/test_proxy.py                           # Findings 17-19
+python -m pytest tests/test_sdk_and_ledger.py                   # Finding 20, ledger scope
+python -m pytest                                               # 261 invariants
 ```
 
 ## Caveats, stated plainly
@@ -845,11 +892,16 @@ python -m pytest                                               # 228 invariants
   ceiling (Finding 12) will bite harder as tasks get longer, and Finding 11
   suggests the pressure release valve is delegation — which is where the
   guarantee weakens.
-- **Findings 13–16 are the ones I went looking for, not ones the corpus
-  produced.** They are therefore not exhaustive: I checked non-ASCII, session
-  longevity, gate cost, concurrency, and payload shape. I did **not** check the
-  `tessera run` MCP proxy path end-to-end (only the in-process `Session` API
-  the proxy wraps), streaming/partial tool results, multi-tenant proxies
-  sharing one process, ledger file growth and rotation, or behaviour across a
-  process restart with `--expected-head`. Any of those could hold more of the
-  same kind of finding.
+- **Findings 13–20 are ones I went looking for, not ones the corpus produced.**
+  Covered: non-ASCII, session longevity, gate cost, concurrency, payload shape,
+  the `tessera run` proxy end-to-end, streaming notifications, proxy session
+  lifetime, the `protect()` SDK path, `@tool` annotations, declassifier
+  construction, and every row of the ledger's honest-scope table including
+  keyed ledgers and `--expected-head`.
+- **Still unchecked**, and each could hold more of the same: HTTP/SSE MCP
+  transports (only stdio exists today, but `MCPInterceptor` is advertised as
+  transport-agnostic and a shared-session HTTP transport would hit Finding 16);
+  ledger file rotation and disk-full behaviour; capability `expires_at` under
+  clock skew; `tessera bench`'s own numbers; and the AgentDojo integration,
+  which is a fourth implementation of the same idea and therefore a fourth
+  chance to disagree with the other three.
