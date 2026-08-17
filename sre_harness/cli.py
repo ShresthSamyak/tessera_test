@@ -33,7 +33,13 @@ def build_parser() -> argparse.ArgumentParser:
         "command",
         choices=["env", "list", "tools", "calibrate", "ab", "frontier"],
     )
-    p.add_argument("--agent", default="scripted", help="scripted | deepseek | claude")
+    p.add_argument(
+        "--agent",
+        default="scripted",
+        help="scripted | deepseek | claude | plan (plan = Tessera's plan "
+             "interpreter driving a DeepSeek planner; it is its own agent shape, "
+             "not a --guard option, so --strictness applies but --guard does not)",
+    )
     p.add_argument("--model", default=None, help="override the model id")
     p.add_argument("--effort", default="high", help="claude only")
     p.add_argument("--max-turns", type=int, default=24)
