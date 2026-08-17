@@ -66,6 +66,26 @@ class ToolSpec:
             },
         }
 
+    def to_openai_tool(self) -> dict[str, Any]:
+        """The OpenAI `tools` shape, which DeepSeek's API also speaks.
+
+        Same schema body as `to_anthropic_tool`, nested one level deeper. Both
+        are generated from the one `params`/`required` declaration so the two
+        model backends cannot drift apart and quietly test different surfaces.
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": dict(self.params),
+                    "required": list(self.required),
+                },
+            },
+        }
+
 
 # ==========================================================================
 # Reads — untrusted
@@ -394,4 +414,10 @@ def anthropic_tools(registry: dict[str, ToolSpec] | None = None) -> list[dict[st
     return [reg[name].to_anthropic_tool() for name in sorted(reg)]
 
 
-__all__ = ["REGISTRY", "ToolSpec", "ExecContext", "anthropic_tools"]
+def openai_tools(registry: dict[str, ToolSpec] | None = None) -> list[dict[str, Any]]:
+    """Registry -> OpenAI/DeepSeek tool definitions, in the same stable order."""
+    reg = registry if registry is not None else REGISTRY
+    return [reg[name].to_openai_tool() for name in sorted(reg)]
+
+
+__all__ = ["REGISTRY", "ToolSpec", "ExecContext", "anthropic_tools", "openai_tools"]
