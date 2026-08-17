@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="naively trust action-tool confirmations; exists to demonstrate "
              "the open_incident echo trap landing",
     )
+    g.add_argument(
+        "--instruction-allowlist",
+        action="store_true",
+        help="stop treating vocabulary the user themselves typed as untrusted "
+             "material (value-flow modes only) — see FINDINGS.md",
+    )
     g.add_argument("--ledger", default=None, help="write the Tessera audit ledger here")
     return p
 
@@ -85,6 +91,7 @@ def make_guard_factory(args: argparse.Namespace, strictness: str | None = None):
         declassifiers=safe_declassifiers() if args.declassifiers == "safe" else None,
         approver=approve_all if args.approve_escalations else deny_all,
         trust_action_confirmations=args.trust_confirmations,
+        instruction_allowlist=args.instruction_allowlist,
         ledger_path=args.ledger,
     )
 
@@ -245,7 +252,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(sweep.report())
         if args.out:
-            everything = [*sweep.bare]
+            # Calibration runs included: a discarded scenario's bare run is the
+            # only record of *why* it was discarded, and that is often the most
+            # interesting thing in the file — an attack the model shrugged off
+            # is a result about the model, not a gap in the corpus.
+            everything = [*cal.runs]
             for rep in sweep.by_mode.values():
                 everything.extend(rep.guarded)
             dump(everything, args.out)
@@ -258,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     report = ab(survivors, agent_factory, guard_factory_fn, workers=args.workers)
     print(report.report())
     if args.out:
-        dump([*report.bare, *report.guarded], args.out)
+        dump([*cal.runs, *report.guarded], args.out)
     return 0
 
 

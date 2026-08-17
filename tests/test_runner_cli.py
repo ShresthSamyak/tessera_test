@@ -95,10 +95,13 @@ def test_find_dotenv_walks_upward(tmp_path):
 
 
 def test_redact_never_reveals_the_key():
-    secret = "sk-6cc4a6a755f34ca5917b56574f2803d1"
+    # A synthetic key shaped like a real one. Never put a live key in a tracked
+    # file — `.gitignore` protects `.env` and nothing else, and a test fixture
+    # is exactly the place a real key gets pasted "just for a moment".
+    secret = "sk-" + "0" * 29 + "beef"
     shown = redact(secret)
     assert secret not in shown
-    assert shown.endswith("03d1") and shown.startswith("sk-")
+    assert shown.endswith("beef") and shown.startswith("sk-")
     assert redact(None) == "<unset>"
     assert redact("") == "<unset>"
 
@@ -115,6 +118,39 @@ def test_dotenv_example_holds_no_real_key():
     for line in (root / ".env.example").read_text(encoding="utf-8").splitlines():
         if line.startswith("DEEPSEEK_API_KEY=") or line.startswith("ANTHROPIC_API_KEY="):
             assert line.split("=", 1)[1].strip() == "", f"real-looking key in template: {line}"
+
+
+def test_no_tracked_file_contains_the_local_key():
+    """`.gitignore` protects `.env` and nothing else.
+
+    Written after doing exactly this wrong: a live key got pasted into a test
+    fixture as a redaction example, where no ignore rule would ever catch it.
+    Reads the key from the environment and greps every tracked file for it, so
+    the check works without knowing the key in advance.
+    """
+    import os
+    import subprocess
+
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if not key or len(key) < 12:
+        pytest.skip("no local key configured to search for")
+
+    root = Path(__file__).resolve().parents[1]
+    listed = subprocess.run(
+        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=False
+    )
+    if listed.returncode != 0:
+        pytest.skip("not a git checkout")
+
+    offenders = []
+    for name in listed.stdout.splitlines():
+        path = root / name
+        try:
+            if key in path.read_text(encoding="utf-8", errors="ignore"):
+                offenders.append(name)
+        except (OSError, UnicodeDecodeError):
+            continue
+    assert not offenders, f"live API key found in tracked file(s): {offenders}"
 
 
 # ==========================================================================

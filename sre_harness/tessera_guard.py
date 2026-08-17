@@ -33,6 +33,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from tessera.session import _significant_tokens
+
 from tessera import (
     AllowlistDeclassifier,
     BlastRadius,
@@ -235,11 +237,14 @@ class TesseraGuard:
         require_capabilities: bool = False,
         capabilities_cover_all: bool = False,
         trust_action_confirmations: bool = False,
+        instruction_allowlist: bool = False,
         session_id: str = "sre-harness",
     ) -> None:
         self.strictness = Strictness(strictness)
         self.approver = approver
+        self.instruction_allowlist = instruction_allowlist
         self.stats = GuardStats()
+        self._user_tokens: set[str] | None = None
 
         self.session = Session(
             session_id=session_id,
@@ -277,10 +282,43 @@ class TesseraGuard:
                 # what it costs rather than assert it.
                 self.session.trust_tool(spec.name)
 
+    # -- the user's own vocabulary is not the attacker's ---------------------
+
+    def _forget_user_tokens(self, instruction: str) -> None:
+        """Stop tracking tokens the user themselves typed.
+
+        Value-flow matching flags an argument when it literally contains a token
+        seen in untrusted data. In a real run that misfires constantly, because
+        the *subject of the task* appears in both places: the user says
+        "checkout-api is degraded, follow its runbook", the logs say
+        "checkout-api" on every line, and so `rollback_deploy(service=
+        "checkout-api", ...)` is flagged as carrying untrusted material. The
+        argument is the one the user asked for.
+
+        A token the user wrote into the trusted instruction carries no
+        information the attacker supplied, so a hit on it is not evidence of
+        attacker influence. Removing exactly those tokens keeps the mechanism
+        intact for everything else — the high-value tokens (`hunter2-Zx9-PROD-4471`,
+        a rotated credential, an attacker URL) are precisely the ones a user
+        never types, so they stay tracked.
+
+        This is a *precision* fix to a heuristic, not a soundness argument, and
+        it is off by default. It also reaches into `_tainted_tokens`, which
+        Tessera does not expose — there is no public way to say "this vocabulary
+        is the user's" today, and the measured cost of not saying it is large
+        (see FINDINGS.md).
+        """
+        if self._user_tokens is None:
+            self._user_tokens = _significant_tokens(instruction)
+        if self._user_tokens:
+            self.session._tainted_tokens -= self._user_tokens
+
     # -- the Guard protocol --------------------------------------------------
 
     def review(self, call: ToolCall, ctx: GuardContext) -> Decision:
         self.stats.reviewed += 1
+        if self.instruction_allowlist and ctx.instruction:
+            self._forget_user_tokens(ctx.instruction)
         result = self.session.authorize_call(call.tool, call.args)
         reason = self._reason(result)
 
