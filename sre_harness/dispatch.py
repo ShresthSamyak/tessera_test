@@ -41,8 +41,19 @@ class Guard(Protocol):
         """Called before the tool runs. Return allow / deny / rewrite."""
         ...
 
-    def observe(self, call: ToolCall, result: ToolResult, ctx: GuardContext) -> None:
-        """Called after the tool runs, so the guard can track provenance."""
+    def observe(
+        self, call: ToolCall, result: ToolResult, ctx: GuardContext
+    ) -> ToolResult | None:
+        """Called after a *successful* tool call, so the guard can track provenance.
+
+        Return None to leave the result alone, or a replacement `ToolResult` to
+        change what the agent reads back. The replacement path exists because
+        result-side defences are real: stripping a markdown image URL out of a
+        fetched document closes an exfiltration channel that no pre-call check
+        can see. A guard that only inspects arguments cannot do that, and a
+        seam that only allowed inspection would quietly make such a layer
+        untestable here.
+        """
         ...
 
 
@@ -53,7 +64,9 @@ class NullGuard:
     def review(self, call: ToolCall, ctx: GuardContext) -> Decision:
         return Decision.allow()
 
-    def observe(self, call: ToolCall, result: ToolResult, ctx: GuardContext) -> None:
+    def observe(
+        self, call: ToolCall, result: ToolResult, ctx: GuardContext
+    ) -> ToolResult | None:
         return None
 
 
@@ -135,9 +148,14 @@ class Dispatcher:
             return self._record(call, decision, result, spec.capability, spec.trust)
 
         result = ToolResult.success(value, spec.trust)
-        record = self._record(call, decision, result, spec.capability, spec.trust)
-        self.guard.observe(call, result, gctx)
-        return record
+        # observe() runs *before* recording so that a guard which rewrites the
+        # result (sanitization) is recorded as what the agent actually read,
+        # not as what the tool originally returned. The transcript has to match
+        # the agent's view or provenance analysis after the fact is fiction.
+        replacement = self.guard.observe(call, result, gctx)
+        if replacement is not None:
+            result = replacement
+        return self._record(call, decision, result, spec.capability, spec.trust)
 
     # -- internals -----------------------------------------------------------
 
