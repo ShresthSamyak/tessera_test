@@ -7,6 +7,7 @@
     ab          calibrate, then A/B one guard against the bare arm
     frontier    A/B every strictness mode against one shared bare arm
                 (add --with-plan for a plan-interpreter row)
+    soak        many tasks through ONE session, the way a proxy actually runs
 
 Defaults are deliberately cheap and deliberately not publishable: the scripted
 agent proves the loop and nothing else. Real numbers need `--agent deepseek`.
@@ -38,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sre_harness")
     p.add_argument(
         "command",
-        choices=["env", "list", "tools", "calibrate", "ab", "frontier"],
+        choices=["env", "list", "tools", "calibrate", "ab", "frontier", "soak"],
     )
     p.add_argument(
         "--agent",
@@ -58,6 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="agent for the undefended baseline (defaults to --agent, or to "
              "'deepseek' when --agent plan, which has no undefended form)",
+    )
+    p.add_argument(
+        "--cycles", type=int, default=12,
+        help="soak only: passes over the corpus through one session",
+    )
+    p.add_argument(
+        "--replay-logs", action="store_true",
+        help="soak only: replay identical logs instead of fresh content per "
+             "task. Saturates the tracked-token set and flatters the result — "
+             "see FINDINGS 27",
     )
     p.add_argument(
         "--workers",
@@ -259,6 +270,32 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_list()
     if args.command == "tools":
         return cmd_tools()
+
+    if args.command == "soak":
+        from .soak import run_soak
+        from .tessera_guard import guard_factory as tguard
+
+        scenarios = select_scenarios(args)
+        if scenarios is None:
+            return 2
+        report = run_soak(
+            scenarios,
+            tguard(
+                args.strictness,
+                declassifiers=None,
+                instruction_allowlist=args.instruction_allowlist,
+            ),
+            cycles=args.cycles,
+            vary_world=not args.replay_logs,
+        )
+        print(report.report(bucket_size=max(1, len([s for s in scenarios
+                                                    if s.family.value == "benign"]))))
+        if args.out:
+            import json as _json
+            with open(args.out, "w", encoding="utf-8") as fh:
+                _json.dump({k: [p.as_dict() for p in v] for k, v in report.by_arm.items()},
+                           fh, indent=1, default=str)
+        return 0
 
     scenarios = select_scenarios(args)
     if scenarios is None:
