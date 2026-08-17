@@ -248,8 +248,14 @@ def _render(value: Any) -> str:
 def build_agent(kind: str = "scripted", **kwargs: Any) -> Agent:
     if kind == "scripted":
         return ScriptedAgent(**kwargs)
-    if kind in ("claude", "anthropic", "model"):
+    if kind in ("claude", "anthropic"):
         return AnthropicAgent(**kwargs)
+    if kind in ("deepseek", "model"):
+        # Local import: deepseek.py imports from this module, so a top-level
+        # import here would be circular.
+        from .deepseek import DeepSeekAgent
+
+        return DeepSeekAgent(**kwargs)
     raise ValueError(f"unknown agent kind: {kind}")
 
 
