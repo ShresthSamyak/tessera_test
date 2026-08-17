@@ -23,9 +23,13 @@ on:
         required: false
         default: "deepseek"
       corpus:
-        description: "benign-only ids, or blank for the full corpus"
+        # NOT blank-for-everything: Actions substitutes an input's default when
+        # you pass an empty string, so "blank" silently meant "benign" and a run
+        # intended as the attack soak quietly replicated the benign one. The
+        # sentinel has to be a real value.
+        description: "benign | all | comma-separated scenario ids"
         required: false
-        default: "B1-runbook-then-rollback,B2-untrusted-read-then-fixed-post,B3-alert-severity-to-page,B4-three-scale-operations,B5-conditional-rollback,B6-summarize-recent-errors,B7-quote-observed-error-rate,B8-clean-webhook-no-untrusted-read,B9-third-party-read-then-scale"
+        default: "benign"
 
 jobs:
   tests:
@@ -76,6 +80,15 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           PYTHONIOENCODING: utf-8
+          # Dispatch inputs go through the environment, never through `${{ }}`
+          # interpolated into the script body — that substitutes before bash
+          # parses, so an input containing shell metacharacters would execute.
+          # It is maintainer-only here, but a repo about untrusted input
+          # reaching dangerous sinks should not ship the pattern.
+          AGENT: ${{ inputs.agent }}
+          STRICTNESS: ${{ inputs.strictness }}
+          CYCLES: ${{ inputs.cycles }}
+          CORPUS: ${{ inputs.corpus }}
         run: |
           # Without pipefail the pipeline reports `tee`'s status, so a soak that
           # died halfway would upload a truncated report and still go green.
@@ -84,11 +97,20 @@ jobs:
           # Without this, an otherwise complete 80-minute run dies on its last
           # statement and uploads nothing. Learned the expensive way in 32004337866.
           mkdir -p runs
+
+          BENIGN=B1-runbook-then-rollback,B2-untrusted-read-then-fixed-post,B3-alert-severity-to-page,B4-three-scale-operations,B5-conditional-rollback,B6-summarize-recent-errors,B7-quote-observed-error-rate,B8-clean-webhook-no-untrusted-read,B9-third-party-read-then-scale
+          case "$CORPUS" in
+            all)       ONLY=() ;;                 # full corpus: attacks included
+            benign|"") ONLY=(--only "$BENIGN") ;; # "" matches Actions' own default substitution
+            *)         ONLY=(--only "$CORPUS") ;;
+          esac
+          echo "corpus=$CORPUS -> ${ONLY[*]:-<full corpus>}"
+
           python -u -m sre_harness.cli soak \
-            --agent "${{ inputs.agent }}" \
-            --strictness "${{ inputs.strictness }}" \
-            --cycles "${{ inputs.cycles }}" \
-            ${{ inputs.corpus && format('--only "{0}"', inputs.corpus) || '' }} \
+            --agent "$AGENT" \
+            --strictness "$STRICTNESS" \
+            --cycles "$CYCLES" \
+            "${ONLY[@]}" \
             --out runs/soak-live.json \
             | tee runs/soak-live.txt
 
@@ -102,9 +124,16 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          AGENT: ${{ inputs.agent }}
+          STRICTNESS: ${{ inputs.strictness }}
+          CYCLES: ${{ inputs.cycles }}
+          CORPUS: ${{ inputs.corpus }}
         run: |
           {
-            echo '### Soak — ${{ inputs.strictness }} / ${{ inputs.agent }} / ${{ inputs.cycles }} cycles'
+            # Corpus in the heading, because a run that silently fell back to
+            # the default is exactly the failure this workflow already had once.
+            echo "### Soak — $STRICTNESS / $AGENT / $CYCLES cycles / corpus=$CORPUS"
             echo '```'
             tail -40 runs/soak-live.txt || echo "(no output)"
             echo '```'
