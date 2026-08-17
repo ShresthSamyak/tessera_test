@@ -263,7 +263,9 @@ def test_the_unlabelled_read_is_not_even_auditable():
         "jsonrpc": "2.0", "id": 1, "method": "tools/call",
         "params": {"name": "read_metrics", "arguments": {}},
     })
-    kinds = [e["kind"] for e in ledger.sink.entries()]
+    sink = ledger.sink
+    assert hasattr(sink, "entries"), "expected an in-memory sink"
+    kinds = [e["kind"] for e in sink.entries()]   # type: ignore[attr-defined]
     assert "label" not in kinds
     assert "sanitize_gap" not in kinds
 

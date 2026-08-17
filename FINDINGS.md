@@ -641,6 +641,127 @@ crash for one line of code.
 
 ---
 
+### Finding 17 — the MCP proxy only labels `text` blocks, so a typed tool result is invisible
+
+**Severity: critical, and the most serious thing in this document.** It is in
+the integration the README leads with, no strictness setting helps, and it
+leaves no trace.
+
+`tessera run` is the front door — "drop Tessera in front of any MCP server".
+Driven end-to-end as a real subprocess (`tests/test_proxy.py`, 15 cases), the
+proxy does the headline job correctly: an untrusted read followed by an
+exfiltration attempt is blocked on the wire, the refusal is legible, and the
+blocked call **never reaches upstream** (asserted against the server's own
+effect log, not the proxy's reply).
+
+Then it fails completely on the return shape.
+
+`_ingest_response` calls `_text_from_content(result["content"])`, which walks
+the list for `{"type": "text"}` items and returns `""` for anything else. On
+`""` it returns early — **without calling `ingest_result` at all**. Measured
+against every shape the MCP result spec allows:
+
+| tool result shape | extracted | labelled? |
+|---|---|---|
+| `content: [{type: "text"}]` | the text | yes |
+| `structuredContent: {...}` | `""` | **no** |
+| `content: [{type: "image"}]` | `""` | **no** |
+| `content: [{type: "resource", ...}]` | `""` | **no** |
+| `content: [{type: "resource_link", ...}]` | `""` | **no** |
+| `content: "a bare string"` | `""` | **no** |
+
+`structuredContent` is not an exotic case — it is how a schema-driven MCP tool
+returns data, and it is in the spec precisely so servers can return typed
+results instead of stringified ones.
+
+The consequence, demonstrated through the real proxy with the same injection
+payload delivered two ways:
+
+```
+via content[].text        -> session tainted -> exfiltration BLOCKED
+via structuredContent     -> session clean   -> exfiltration ALLOWED
+```
+
+Three things make this worse than a normal bug:
+
+1. **No mode helps.** This is an *ingestion* gap, not a propagation one.
+   `paranoid` cannot taint on data it was never shown —
+   `test_paranoid_does_not_close_the_structured_content_gap` confirms a
+   `delete_namespace` goes through after a `structuredContent` read.
+2. **It is silent.** Tessera records a `sanitize_gap` entry for values it could
+   not *rebuild*. A value it never looked at produces nothing: the ledger holds
+   a `decision` and no `label`, so an incident review cannot tell that
+   unlabelled data entered the session.
+3. **`Session` is not at fault.** `ingest_result` handles arbitrary nested
+   structures correctly — my in-process integration passes dicts and lists and
+   they are walked to their string leaves. The bug is entirely in the proxy's
+   extraction, which is why none of Findings 1–16 could have found it.
+
+**Recommendation:** ingest the whole `result` object, not `_text_from_content`
+of one field. `ingest_result` already walks arbitrary structures and preserves
+shape, so this is close to a one-line change — pass `result` and write back
+the sanitized copy. Until then, the proxy should at minimum emit a
+`sanitize_gap` for any result whose content it could not read, so the hole is
+auditable rather than invisible.
+
+---
+
+### Finding 18 — streamed partial results move data past the provenance step entirely
+
+**Severity: medium-high, same root cause as 17 and not fixed by fixing 17.**
+
+`_SubprocessUpstream.__call__` reads upstream lines until the awaited response
+id arrives and forwards everything else — server-initiated requests and
+notifications — straight to the client via `on_notification`. That is correct
+MCP behaviour, and it means a server that streams partial output as progress
+notifications delivers that content to the agent through a path with **no
+ingestion step in it at all**.
+
+A long-running tool that streams results is a normal MCP pattern, and it is
+exactly the shape a `search_logs`-style tool would use for a large result set.
+
+**Recommendation:** route notifications through `ingest_result` before
+forwarding, or document that streaming servers are unsupported under the proxy.
+
+---
+
+### Finding 19 — the proxy holds one `Session` for its entire lifetime
+
+**Severity: medium. Finding 14, but with the blast radius of a daemon.**
+
+`StdioProxy.run` calls `_build_session()` exactly once. Combined with Finding 14
+(taint never recovers, no reset API), a proxy fronting a long-lived agent
+accumulates taint monotonically for as long as the process runs. In `paranoid`
+that means the first log line the agent ever reads disables dangerous actions
+for the rest of the process; in `balanced` the token set grows without bound
+(Finding 15) and over-blocking with it.
+
+This is the deployment shape the README recommends, and it is the one where
+Findings 14 and 15 bite hardest.
+
+---
+
+### What the proxy gets right
+
+Worth stating plainly, because Findings 17–19 are severe enough to read as a
+verdict on the whole thing and they are not:
+
+- **The core enforcement works on the wire.** Untrusted `text` → exfil is
+  blocked, and `test_blocked_call_never_reaches_upstream` proves the refusal is
+  a real refusal rather than a relabelled success — checked against the upstream
+  server's own effect log.
+- **The refusal is legible.** `[Tessera blocked this action] <reason>` comes
+  back as a readable `isError` result, so the agent can adapt.
+- **The ledger survives a restart.** Two proxy lifetimes writing one file
+  produce a single continuous chain: sequence numbers keep climbing, no
+  duplicates, `verify_ledger` passes.
+- **The truncation residual is exactly as documented.** Dropping the last two
+  entries — the ones recording the block — verifies clean; the same file fails
+  against `--expected-head`. The CLI exits 0 and 1 respectively. Honest docs,
+  matching behaviour.
+
+---
+
 ## What holds up
 
 Verified mechanically (228 tests; `test_tessera_guard.py` 38, `test_plan_mode.py` 34,
