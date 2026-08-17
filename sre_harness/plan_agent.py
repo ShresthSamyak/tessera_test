@@ -172,6 +172,8 @@ class PlanAgent:
     strictness: str | Strictness = Strictness.PARANOID
     planner: Planner | None = None
     model: str | None = None
+    #: Use the hand-written plan for the scenario instead of calling a model.
+    canonical: bool = False
     declassifiers: bool = False
     #: Auto-derive a capability per dangerous step, scoped to its constant
     #: arguments. This is plan mode's advertised least-authority story, so it is
@@ -185,9 +187,21 @@ class PlanAgent:
     last_plan: dict[str, Any] | None = field(default=None, init=False)
     usage: dict[str, int] = field(default_factory=dict, init=False)
 
-    def _make_planner(self) -> Planner:
+    def _make_planner(self, scenario: Scenario | None = None) -> Planner:
         if self.planner is not None:
             return self.planner
+        if self.canonical:
+            # The hand-written plan for this scenario. Isolates the mode's own
+            # ceiling from the live planner's quality — see scenarios/plans.py.
+            from tessera.planner import ScriptedPlanner
+
+            from .scenarios.plans import CANONICAL
+
+            if scenario is None or scenario.id not in CANONICAL:
+                raise PlannerError(
+                    f"no canonical plan for scenario {scenario.id if scenario else '<none>'}"
+                )
+            return ScriptedPlanner(CANONICAL[scenario.id].as_json())
         kwargs: dict[str, Any] = {}
         if self.model:
             kwargs["model"] = self.model
