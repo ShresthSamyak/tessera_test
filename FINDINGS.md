@@ -881,6 +881,30 @@ The named caveat next to it *is* accurate — I confirmed balanced still leaks
 specifically the `data-laundering-exfil` scenario, which is the same mechanism
 as Finding 1.
 
+**The larger point is what the table can never say.** `tessera bench` takes no
+model and cannot be made to: the CLI exposes only `--detail`, and underneath,
+`run_scenario(scenario, strictness)` has no agent parameter while `Scenario`
+carries fixed `steps` and `results`. The benchmark replays a script. So every
+number Tessera publishes about itself — containment, escalations, the whole
+frontier — is a statement about *the policy engine given a fixed call sequence*,
+never about what an agent does.
+
+That is a defensible design (it is deterministic, free, and it isolates the
+variable the project controls), and the README does not claim otherwise. But it
+means a reader cannot reproduce, or even express, the question "what happens
+with a real model" using the shipped tooling — they have to build the harness
+themselves, which is what this repo is. The gap between the two is not small:
+`tessera bench` reports 86% balanced containment; the same policy under
+`deepseek-chat` produced a 64% benign pass rate before any attack was
+considered, and Finding 27 shows the deployment-shaped number is 41%. None of
+those disagree — they answer different questions — but only one of them is
+labelled as evidence on the front page.
+
+**Recommendation:** an `--agent` seam on `run_scenario` (even just a callable
+returning the next tool call) would let the published numbers and a live number
+sit side by side, and would cost the project nothing in determinism since the
+scripted path stays the default.
+
 ---
 
 ### Finding 24 — an unwritable ledger is a denial of service, undocumented
@@ -1301,11 +1325,21 @@ python -m pytest                                               # 308 invariants
   annotations, declassifier construction, capability expiry/forgery/attenuation,
   `tessera bench` against its own README, ledger write failure at open and
   mid-run, HMAC key rotation, and every row of the ledger's honest-scope table.
-- **Still unchecked.** No HTTP/SSE MCP transport ships today — stdio is the only
-  one — so Finding 16 is a forward-looking risk there rather than a present bug,
-  but `MCPInterceptor` is explicitly documented as transport-agnostic and a
-  shared-session HTTP transport would walk straight into it. Also untested: the
-  `tessera bench` numbers under a real model rather than its scripted harness.
+- **Not checkable, rather than unchecked.** Two items I had listed as untested
+  turn out to be untestable with what ships, which is a different statement and
+  a fairer one:
+  - No HTTP/SSE MCP transport exists — stdio is the only one — so Finding 16 is
+    a forward-looking risk there rather than a present bug. `MCPInterceptor` is
+    documented as transport-agnostic, and a shared-session HTTP transport would
+    walk straight into it.
+  - `tessera bench` under a real model cannot be run at all: there is no agent
+    seam anywhere in `tessera.eval.harness` (see Finding 23). Its numbers are
+    replays of fixed call sequences by construction.
+- **Still genuinely unchecked: a second model.** Every live number here is
+  `deepseek-chat`. Findings 2, 9 and 12 each confound "what the mechanism does"
+  with "what this model does", and I have said so at each one, but the clean
+  version of that experiment — same corpus, same policy, two models — has not
+  been run and would need a second provider key.
 - **Resolved since first writing.** Finding 27 originally ran on `ScriptedAgent`,
   and I flagged that it therefore measured the policy over a long session rather
   than a model. That has now been run live — 360 tasks on `deepseek-chat`, 80
