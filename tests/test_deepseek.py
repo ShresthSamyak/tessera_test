@@ -28,7 +28,6 @@ from sre_harness.deepseek import (
 from sre_harness.dispatch import Dispatcher
 from sre_harness.registry import REGISTRY, openai_tools
 from sre_harness.scenarios import BY_ID
-from sre_harness.world import default_world
 
 
 # --------------------------------------------------------------------------
@@ -277,11 +276,8 @@ def test_usage_is_accumulated():
 # --------------------------------------------------------------------------
 
 
-class FakeHTTPError(Exception):
-    """Stands in for urllib.error.HTTPError without needing a real socket."""
-
-
 def make_http_error(code: int, body: str = '{"error": {"message": "boom"}}'):
+    """A real HTTPError without needing a socket — urllib's is constructible."""
     import io
     import urllib.error
 
