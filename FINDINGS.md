@@ -943,6 +943,76 @@ the canonical-plan arm exists precisely because of that.
 
 ---
 
+### Finding 27 — a long-lived session loses more than half its legitimate work, and does it in one step
+
+**Severity: high. This is what Findings 14, 15 and 19 add up to, and it is
+larger than any of them looked separately.**
+
+Every other number in this document came from a benchmark shape that hides
+these three at once: `run_scenario` builds a fresh `World` **and a fresh guard**
+per scenario, so each measurement starts from an untainted session. A real
+deployment does not — `StdioProxy.run` builds one `Session` and keeps it.
+
+`sre_harness/soak.py` changes exactly one variable. The `World` stays fresh per
+task (it has to, or effects accumulate and the oracles stop meaning anything);
+the guard persists. Full corpus, 240 tasks, `balanced`:
+
+| arm | benign pass | attacks landed | end tokens | end gate latency | ledger entries |
+|---|---|---|---|---|---|
+| `fresh` (benchmark shape) | **77.8%** | 48/132 (36%) | 22 | 0.04 ms | 27 |
+| `shared` (deployment shape) | **36.1%** | 36/132 (27%) | 4,743 | 0.38 ms | 6,137 |
+
+**A 42-point drop in legitimate work, from changing nothing but session
+lifetime.** That gap is the amount every other utility number in this document
+is flattered by its own harness.
+
+**It is a cliff, not a slope.** This matters for how the risk gets described —
+"degrades over time" suggests something you would notice and could budget for.
+Benign pass rate by bucket of 9 tasks:
+
+```
+fresh    78%  78%  78%  78%  78%  78%  78%  78%  78%  78%  78%  78%
+shared   67%  33%  33%  33%  33%  33%  33%  33%  33%  33%  33%  33%
+```
+
+The first untrusted read moves the session to the floor permanently and every
+task afterwards gets the floor. There is no gradual phase to monitor.
+
+**The floor is exactly the tasks that need no dangerous action.** At steady
+state in `paranoid`, the survivors are `B4-three-scale-operations`,
+`B6-summarize-recent-errors`, `B9-third-party-read-then-scale` — every one
+reversible and non-exfiltrating. Everything that has to publish, page, or roll
+back is refused for the life of the process. A long-running agent under
+`paranoid` is, after its first log line, an agent that can only scale things.
+
+**Growth is bounded by data diversity, not by anything Tessera does.** This
+corrects Finding 15, which I had stated too strongly. Replaying one fixture
+makes the token set saturate — 47 tokens, flat forever — and my original
+measurement happened to use highly varied log lines, which is why it looked
+unbounded. Both are true, and the distinction is the point: tokens grow with the
+number of *distinct* strings the session has seen, so a real deployment reading
+real logs (fresh request ids, tenant ids, trace ids every incident) grows without
+bound at ~20 tokens/task, while a test replaying a fixture does not grow at all.
+Gate latency tracks it: 0.07 ms → 0.38 ms across 240 tasks, a 5x rise that is
+still trivial in absolute terms and on a straight line.
+
+**Containment does not degrade — only utility does.** Attacks land no more often
+late in a session than early (36% → 27%, if anything slightly *better*, because
+accumulated taint blocks more). "Everything gets worse over time" would be the
+wrong summary. The security property is stable; the tool becomes unusable for
+legitimate work long before it becomes unsafe.
+
+**Recommendation:** this is Finding 14's missing `Session.begin_task()` restated
+with a number attached. A per-task boundary that resets `context_level` and
+`_tainted_tokens` while keeping the ledger chain continuous would recover the
+42 points, bound the memory, and flatten the latency curve — and it is safe to
+grant, because a new user instruction is trusted input by definition.
+
+Reproduce: `python -m sre_harness.cli soak --strictness balanced --cycles 12`
+(add `--replay-logs` to see the saturating, flattering version).
+
+---
+
 ### What the proxy gets right
 
 Worth stating plainly, because Findings 17–19 are severe enough to read as a
