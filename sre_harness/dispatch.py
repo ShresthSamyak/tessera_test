@@ -39,9 +39,11 @@ class GuardContext:
 class Guard(Protocol):
     def review(self, call: ToolCall, ctx: GuardContext) -> Decision:
         """Called before the tool runs. Return allow / deny / rewrite."""
+        ...
 
     def observe(self, call: ToolCall, result: ToolResult, ctx: GuardContext) -> None:
         """Called after the tool runs, so the guard can track provenance."""
+        ...
 
 
 class NullGuard:
