@@ -383,12 +383,20 @@ def frontier(
     max_calls: int = 40,
     workers: int = 1,
     bare: Sequence[RunResult] | None = None,
+    extra_arms: Mapping[str, tuple[AgentFactory, GuardFactory | None]] | None = None,
 ) -> Frontier:
     """One A/B per mode against a shared bare arm.
 
     `bare` lets a caller reuse runs it already paid for — the calibration pass
     is a bare arm over the same scenarios, so re-running it would double the
     model spend to produce the same numbers.
+
+    `extra_arms` exists for plan mode, which is not a guard setting but a
+    different agent: the interpreter authorizes the calls itself. Comparing it
+    on the same row as the strictness modes is the comparison worth making, so
+    an arm may override the agent as well as the guard. Its bare arm is still
+    the undefended *tool-loop* agent — plan mode has no undefended equivalent,
+    and pairing it against a bare plan run would compare it to itself.
     """
     out = Frontier()
     out.bare = (
@@ -409,6 +417,16 @@ def frontier(
             workers,
         )
         out.by_mode[mode] = ABReport(bare=out.bare, guarded=guarded)
+
+    for name, (make_agent, make_guard) in (extra_arms or {}).items():
+        runs = _map(
+            lambda s, m=name, a=make_agent, g=make_guard: run_scenario(
+                s, a(), g() if g is not None else None, arm=m, max_calls=max_calls
+            ),
+            scenarios,
+            workers,
+        )
+        out.by_mode[name] = ABReport(bare=out.bare, guarded=runs)
     return out
 
 

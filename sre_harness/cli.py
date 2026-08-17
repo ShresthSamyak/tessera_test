@@ -82,6 +82,25 @@ def build_parser() -> argparse.ArgumentParser:
              "material (value-flow modes only) — see FINDINGS.md",
     )
     g.add_argument("--ledger", default=None, help="write the Tessera audit ledger here")
+    g.add_argument(
+        "--with-plan",
+        action="store_true",
+        help="add a 'plan' row to the frontier: Tessera's plan interpreter as "
+             "the agent, against the same bare tool-loop arm",
+    )
+    g.add_argument(
+        "--plan-strictness",
+        default="paranoid",
+        choices=MODES,
+        help="strictness for the plan arm (default paranoid — plan mode's "
+             "precise labels are supposed to make that affordable)",
+    )
+    g.add_argument(
+        "--no-capabilities",
+        action="store_true",
+        help="plan mode only: skip the per-step capabilities auto-derived from "
+             "the plan, to isolate how much of the result they account for",
+    )
     return p
 
 
@@ -106,6 +125,18 @@ def make_agent_factory(args: argparse.Namespace):
     def factory():
         if args.agent == "scripted":
             return build_agent("scripted")
+        if args.agent == "plan":
+            # Plan mode is an agent shape, not a guard: the interpreter does the
+            # authorizing, so --strictness applies here and --guard does not.
+            from .plan_agent import PlanAgent
+
+            return PlanAgent(
+                strictness=args.strictness,
+                model=args.model,
+                declassifiers=args.declassifiers == "safe",
+                capabilities=not args.no_capabilities,
+                ledger_path=args.ledger,
+            )
         if args.agent == "deepseek":
             kwargs = {"max_turns": args.max_turns}
             if args.model:
@@ -249,12 +280,27 @@ def main(argv: list[str] | None = None) -> int:
         if any(f is None for f in factories.values()):
             print("--guard none is meaningless for a frontier sweep", file=sys.stderr)
             return 2
+        extra = {}
+        if args.with_plan:
+            from .plan_agent import PlanAgent
+
+            def plan_factory():
+                return PlanAgent(
+                    strictness=args.plan_strictness,
+                    model=args.model,
+                    declassifiers=args.declassifiers == "safe",
+                    capabilities=not args.no_capabilities,
+                    ledger_path=args.ledger,
+                )
+
+            extra["plan"] = (plan_factory, None)
         sweep = frontier(
             survivors,
             agent_factory,
             factories,  # type: ignore[arg-type]
             workers=args.workers,
             bare=shared_bare,  # type: ignore[arg-type]
+            extra_arms=extra or None,
         )
         print(sweep.report())
         if args.out:
