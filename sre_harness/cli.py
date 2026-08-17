@@ -128,11 +128,13 @@ def make_guard_factory(args: argparse.Namespace, strictness: str | None = None):
     )
 
 
-def make_agent_factory(args: argparse.Namespace):
+def make_agent_factory(args: argparse.Namespace, kind: str | None = None):
+    kind = kind or args.agent
+
     def factory():
-        if args.agent == "scripted":
+        if kind == "scripted":
             return build_agent("scripted")
-        if args.agent == "plan":
+        if kind == "plan":
             # Plan mode is an agent shape, not a guard: the interpreter does the
             # authorizing, so --strictness applies here and --guard does not.
             from .plan_agent import PlanAgent
@@ -145,7 +147,7 @@ def make_agent_factory(args: argparse.Namespace):
                 capabilities=not args.no_capabilities,
                 ledger_path=args.ledger,
             )
-        if args.agent == "deepseek":
+        if kind == "deepseek":
             kwargs = {"max_turns": args.max_turns}
             if args.model:
                 kwargs["model"] = args.model

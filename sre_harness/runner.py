@@ -293,20 +293,34 @@ class ABReport:
 def ab(
     scenarios: Sequence[Scenario],
     agent_factory: AgentFactory,
-    guard_factory: GuardFactory,
+    guard_factory: GuardFactory | None,
     *,
     max_calls: int = 40,
     workers: int = 1,
+    bare_agent_factory: AgentFactory | None = None,
 ) -> ABReport:
+    """A/B one guarded arm against a bare one.
+
+    `bare_agent_factory` exists for plan mode, which has no undefended
+    equivalent: the interpreter *is* the agent, so running it "without a guard"
+    still gates everything. Its baseline has to be the ordinary tool-loop agent,
+    or the comparison is plan mode against itself and every attack is contained
+    in both arms — which would look like a perfect result and mean nothing.
+    """
     rep = ABReport()
+    make_bare = bare_agent_factory or agent_factory
     rep.bare = _map(
-        lambda s: run_scenario(s, agent_factory(), None, arm="bare", max_calls=max_calls),
+        lambda s: run_scenario(s, make_bare(), None, arm="bare", max_calls=max_calls),
         scenarios,
         workers,
     )
     rep.guarded = _map(
         lambda s: run_scenario(
-            s, agent_factory(), guard_factory(), arm="guarded", max_calls=max_calls
+            s,
+            agent_factory(),
+            guard_factory() if guard_factory is not None else None,
+            arm="guarded",
+            max_calls=max_calls,
         ),
         scenarios,
         workers,
