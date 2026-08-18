@@ -10,6 +10,21 @@ there are real ones. Every finding carries a **Under plan mode** note, because
 plan mode changes the answer for most of them — usually for the better, and in
 two cases by introducing a failure the heuristic path does not have.
 
+> **Which version this describes.** Everything below measures `tessera-proxy==0.2.3`
+> **as published on PyPI** — that is what the CI job installs and what both live
+> soaks ran against. Since these findings were written, the Tessera working tree
+> has begun changing in response to them, and as of 2026-08-18 it carries commits
+> that add `Session.begin_task()` (Findings 14/27), synchronise session state
+> (Finding 16), extend tokenisation to non-ASCII (Finding 13), rework the proxy's
+> content extraction (Finding 17), and add an `exfil_requires_clean_context`
+> option (Finding 1).
+>
+> **I have not verified any of those fixes.** What I have confirmed is only that
+> the interfaces changed: 8 tests in this repo now fail against the working tree
+> while passing against published 0.2.3, which is those tests correctly detecting
+> that the behaviour they characterise is gone. Re-measuring is separate work and
+> has not been done. Read every number here as describing 0.2.3.
+
 ---
 
 ## The headline comparison
